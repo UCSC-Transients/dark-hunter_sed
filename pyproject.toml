@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dark-hunter-sed"
+version = "0.1.0"
+description = "Spectrophotometric SED fitting for Dark Hunters (uberMS / MIST / Payne)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "BSD-3-Clause" }
+dependencies = [
+  "numpy>=1.26,<2.0",
+  "scipy>=1.11",
+  "astropy>=6.0",
+  "requests>=2.31",
+  "astroquery>=0.4",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+darkhunter-sed = "darkhunter_sed.cli:main"
+darkhunter-sed-convert = "darkhunter_sed.convert_spectra:main"
+darkhunter-sed-gather-phot = "darkhunter_sed.photometry_gather:main"
+darkhunter-sed-batch = "darkhunter_sed.batch:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["darkhunter_sed*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

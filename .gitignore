@@ -1,0 +1,24 @@
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+*.egg-info/
+
+# Outputs
+output/
+samples/
+plots/
+*.fits
+!tests/fixtures/*.fits
+
+# Models (large; not in git)
+models/
+
+# Env
+.venv/
+venv/
+.env
+
+# OS
+.DS_Store

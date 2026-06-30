@@ -1,0 +1,10 @@
+# Install dark-hunter_rv from sibling repo in editable mode:
+#   pip install -e ../rvs/dark-hunter_rv
+# Install stellar stack (uberMS, ThePayne, MISTy) separately under STELLAR_ROOT.
+
+numpy>=1.26,<2.0
+scipy>=1.11
+astropy>=6.0
+requests>=2.31
+astroquery>=0.4
+pytest>=8.0
