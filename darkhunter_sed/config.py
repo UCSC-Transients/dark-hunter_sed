@@ -7,6 +7,11 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
+# Ingest: peel noisy blaze-normalized order ends (overlap wings rising to ~1.05)
+# while |flux - 1| exceeds tolerance, keeping at least this many pixels per order.
+SPECTRUM_ORDER_END_DEV_TOL = 0.04
+SPECTRUM_ORDER_END_MIN_PIXELS = 18
+
 
 def stellar_root() -> Path:
     """Directory containing uberMS, ThePayne, MISTy (sibling installs)."""
@@ -41,6 +46,13 @@ def plots_dir() -> Path:
 def photometry_dir() -> Path:
     return Path(
         os.environ.get("DARKHUNTER_SED_PHOTOMETRY_DIR", output_dir() / "photometry")
+    ).expanduser().resolve()
+
+
+def masks_dir() -> Path:
+    """Picker regions JSON directory (``regions_Gaia_DR3_<id>_*.json``)."""
+    return Path(
+        os.environ.get("DARKHUNTER_SED_MASKS_DIR", output_dir() / "masks")
     ).expanduser().resolve()
 
 

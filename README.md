@@ -19,12 +19,20 @@ pip install -e ~/stellar/uberMS ~/stellar/ThePayne ~/stellar/MISTy
 
 1. **RV pipeline** (prerequisite): `dark-hunter_rv` produces `Gaia_DR3_<id>_summary.txt` with mask-CCF RVs and Gaia GSP-Phot priors.
 
-2. **Photometry** (if needed):
+2. **Photometry** — gathered automatically on first `cli` / `batch` run when `{gaia_id}_phot.fits` is missing (network query). To gather manually or refresh:
    ```bash
    python -m darkhunter_sed.photometry_gather <gaia_id> -d output/photometry
    ```
+   Disable auto-gather with `--no-auto-gather-phot` on `cli` or `batch`.
 
-3. **Fit** (UMS + UTP; UMS gives luminous `initial_Mass` → M1):
+3. **Optional blaze regions** (picker on a reference star, then reuse for others):
+   ```bash
+   scripts/run_local.sh scripts/pick_spectrum_regions.py <reference_gaia_id> --from-spec-root
+   # Fit + Save writes per-order blaze to output/masks/regions_Gaia_DR3_<id>_*.json
+   ```
+   `cli`, `batch`, `convert_spectra`, and `plot_order_blaze.py` auto-resolve the newest matching regions file per star, or pass `--regions-json` explicitly (shared blaze across stars).
+
+4. **Fit** (UMS + UTP; UMS gives luminous `initial_Mass` → M1):
    ```bash
    export STELLAR_ROOT=~/stellar
    export DARKHUNTER_OUTPUT_DIR=../rvs/dark-hunter_rv/output
@@ -35,7 +43,13 @@ pip install -e ~/stellar/uberMS ~/stellar/ThePayne ~/stellar/MISTy
 
    Per-epoch `vrad_i` uses **normal priors** from RV `[PIPELINE RESULTS]` (errors inflated 2× by default, floor 2 km/s). Gaia priors read from summary unless `--force-redownload`.
 
-4. **Spectrum prep** uses dark-hunter_rv **sinc² blaze** + CR rejection (`calibration/blaze_orders_apf.json`), coalesced to 5150–5300 Å for uberMS.
+4. **Spectrum prep** uses dark-hunter_rv **sinc² blaze** (`sinc_blaze_only`: calibrated blaze + iterative S/N continuum mask, median-scaled; no modpoly pc in UMS), coalesced to 5150–5300 Å for uberMS. Stored per-order blaze from the picker overrides the calibrated shape when regions JSON is present. Set `DARKHUNTER_BLAZE_CALIBRATION` to the rebuilt `blaze_orders_apf.json` (see `scripts/run_local.sh`).
+
+5. **Blaze diagnostic** (no UMS samples required):
+   ```bash
+   scripts/run_local.sh scripts/plot_order_blaze.py <gaia_id> --from-spec-root --order 35 \
+     --regions-json output/masks/regions_Gaia_DR3_<ref_id>_epoch_1.json --blaze-only
+   ```
 
 ## Environment
 
@@ -47,6 +61,8 @@ pip install -e ~/stellar/uberMS ~/stellar/ThePayne ~/stellar/MISTy
 | `DARKHUNTER_OUTPUT_DIR` | RV summaries |
 | `SPEC_ROOT` | APF reduced spectra tree |
 | `DARKHUNTER_SED_MODELS_DIR` | NN weights override |
+| `DARKHUNTER_BLAZE_CALIBRATION` | Per-order sinc² blaze JSON (default: dark-hunter_rv `calibration/blaze_orders_apf.json`) |
+| `DARKHUNTER_SED_MASKS_DIR` | Picker regions JSON directory (default: `output/masks/`) |
 
 ## Outputs
 
@@ -64,6 +80,16 @@ bash scripts/cron_update_sed.sh   # after RV cron
 ```
 
 See [docs/operations.md](docs/operations.md).
+
+## Local macOS
+
+`dustmaps` is installed for **`/opt/local/bin/python`** (MacPorts), not necessarily for other interpreters. Use:
+
+```bash
+bash scripts/run_local.sh -m darkhunter_sed.cli <gaia_id> --from-spec-root --plot
+```
+
+See [docs/operations.md](docs/operations.md) for full env block.
 
 ## Tests
 

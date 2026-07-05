@@ -89,3 +89,30 @@ def test_needs_update_skips_when_outputs_newer(tmp_path, monkeypatch):
     )
     assert ok is False
     assert reason == "up to date"
+
+
+def test_needs_update_missing_phot_with_auto_gather(tmp_path, monkeypatch):
+    gid = "2254791692199089536"
+    spec_root_path = tmp_path / "spec"
+    phot_dir = tmp_path / "phot"
+    rv_out = tmp_path / "rv"
+    spec_dir = spec_root_path / f"Gaia_DR3_{gid}"
+    spec_dir.mkdir(parents=True)
+    phot_dir.mkdir(parents=True)
+
+    for ep in (1, 2):
+        (spec_dir / f"Gaia_DR3_{gid}_epoch_{ep}.txt").write_text("# Order 1\n5000 1.0\n")
+
+    monkeypatch.setattr(sed_config, "samples_dir", lambda: tmp_path / "samples")
+    monkeypatch.setattr(sed_config, "sed_summaries_dir", lambda: tmp_path / "sed_summaries")
+
+    ok, reason = batch.needs_update(
+        gid,
+        spec_root_path=spec_root_path,
+        phot_dir=phot_dir,
+        rv_out=rv_out,
+        auto_gather_photometry=True,
+    )
+    assert ok is True
+    assert reason == "missing photometry (will gather)"
+

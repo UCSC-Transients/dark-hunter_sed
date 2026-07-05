@@ -1,7 +1,9 @@
 import argparse
+import logging
 import math
 import os
 import warnings
+from pathlib import Path
 
 import numpy as np
 from astropy.io import fits
@@ -20,6 +22,8 @@ import astropy.coordinates as coord
 # Gaia positions are at ``ref_epoch`` (often ~2016). For Vizier cone search, propagating
 # to ~2011 matches the PS1 observation era better than J2000.0 (which is only equinox).
 PS1_VIZIER_DEFAULT_EPOCH_JY = 2011.0
+
+logger = logging.getLogger(__name__)
 
 
 def good_number_checker(number):
@@ -349,6 +353,70 @@ def save_photometry_to_fits(source_id, photometry, outdir=None):
 
     fits.HDUList([hdu_primary, hdu_table]).writeto(output_filename, overwrite=True)
     print(f"Saved: {output_filename}")
+    return Path(output_filename)
+
+
+def gather_photometry_for_star(
+    source_id: str,
+    *,
+    outdir: str | os.PathLike | None = None,
+    ps1_radius: float = 3.0,
+    ps1_vizier_epoch_jyear: float | None = None,
+    phot_outlier_sigma: float | None = None,
+    phot_outlier_min_kept: int = 3,
+    phot_outlier_model: str = "blackbody",
+) -> Path:
+    """Query catalogs and write ``{source_id}_phot.fits``; returns output path."""
+    photometry = query_catalogs(
+        source_id,
+        radius=ps1_radius,
+        ps1_vizier_epoch_jyear=ps1_vizier_epoch_jyear,
+    )
+    if phot_outlier_sigma is not None and phot_outlier_sigma > 0:
+        phot_d = {b: [float(m), float(e)] for b, m, e in photometry}
+        filt = stellar_data.ordered_phot_filtarr_from_dict(phot_d)
+        phot_d, filt, dropped = stellar_data.iterative_photometry_outlier_rejection(
+            phot_d,
+            filt,
+            sigma=float(phot_outlier_sigma),
+            min_kept=max(3, int(phot_outlier_min_kept)),
+            method=str(phot_outlier_model),
+        )
+        if dropped:
+            warnings.warn(
+                f"gather_phot: dropped photometry outlier bands: {dropped}",
+                UserWarning,
+                stacklevel=2,
+            )
+        photometry = [(b, phot_d[b][0], phot_d[b][1]) for b in filt]
+    return save_photometry_to_fits(source_id, photometry, outdir=outdir)
+
+
+def ensure_photometry_fits(
+    gaia_id: str,
+    phot_dir: str | os.PathLike | None = None,
+    *,
+    auto_gather: bool = True,
+) -> Path:
+    """
+    Return path to ``{gaia_id}_phot.fits``, gathering from catalogs when missing.
+
+    When ``auto_gather`` is False and the file is absent, raises FileNotFoundError
+    with a hint to run ``python -m darkhunter_sed.photometry_gather``.
+    """
+    from darkhunter_sed.config import photometry_dir as default_phot_dir
+
+    dir_path = Path(phot_dir) if phot_dir is not None else default_phot_dir()
+    path = Path(stellar_data.photometry_fits_path(gaia_id, dir_path))
+    if path.is_file():
+        return path.resolve()
+    if not auto_gather:
+        raise FileNotFoundError(
+            f"Photometry file not found: {path}\n"
+            f"Run: python -m darkhunter_sed.photometry_gather {gaia_id} -d {dir_path}"
+        )
+    logger.info("Gathering photometry for Gaia %s (network query)", gaia_id)
+    return gather_photometry_for_star(gaia_id, outdir=dir_path)
 
 
 def main():
@@ -397,29 +465,15 @@ def main():
         help="Outlier model when --phot-outlier-sigma is set (default blackbody).",
     )
     args = parser.parse_args()
-    photometry = query_catalogs(
+    gather_photometry_for_star(
         args.source_id,
-        radius=args.ps1_radius,
+        outdir=args.outdir,
+        ps1_radius=args.ps1_radius,
         ps1_vizier_epoch_jyear=args.ps1_vizier_epoch,
+        phot_outlier_sigma=args.phot_outlier_sigma,
+        phot_outlier_min_kept=args.phot_outlier_min_kept,
+        phot_outlier_model=args.phot_outlier_model,
     )
-    if args.phot_outlier_sigma is not None and args.phot_outlier_sigma > 0:
-        phot_d = {b: [float(m), float(e)] for b, m, e in photometry}
-        filt = stellar_data.ordered_phot_filtarr_from_dict(phot_d)
-        phot_d, filt, dropped = stellar_data.iterative_photometry_outlier_rejection(
-            phot_d,
-            filt,
-            sigma=float(args.phot_outlier_sigma),
-            min_kept=max(3, int(args.phot_outlier_min_kept)),
-            method=str(args.phot_outlier_model),
-        )
-        if dropped:
-            warnings.warn(
-                "gather_phot: dropped photometry outlier bands: {}".format(dropped),
-                UserWarning,
-                stacklevel=2,
-            )
-        photometry = [(b, phot_d[b][0], phot_d[b][1]) for b in filt]
-    save_photometry_to_fits(args.source_id, photometry, outdir=args.outdir)
 
 
 if __name__ == "__main__":
