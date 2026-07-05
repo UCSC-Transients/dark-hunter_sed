@@ -37,6 +37,61 @@ def _float_or_nan(val) -> float:
     return x if math.isfinite(x) else float("nan")
 
 
+def parse_legacy_file_summary_rv_epochs(summary_path: Path) -> list[RvEpoch]:
+    """
+    Parse legacy ``# File Summary`` rows (basename MJD RV Err …) when
+    ``[PIPELINE RESULTS]`` is absent.
+    """
+    text = summary_path.read_text(encoding="utf-8", errors="replace")
+    if "[PIPELINE RESULTS]" in text:
+        return []
+    out: list[RvEpoch] = []
+    in_block = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.lower().startswith("# file summary"):
+            in_block = True
+            continue
+        if not in_block:
+            continue
+        if not stripped or stripped.startswith("#"):
+            if out and stripped.startswith("#") and "file summary" not in stripped.lower():
+                break
+            continue
+        if stripped.startswith("[") and stripped.endswith("]"):
+            break
+        parts = stripped.split()
+        if len(parts) < 4:
+            continue
+        basename = Path(parts[0]).name
+        mjd = _float_or_nan(parts[1])
+        rv = _float_or_nan(parts[2])
+        err = _float_or_nan(parts[3])
+        if not rv_epoch_is_valid(mjd, rv):
+            continue
+        m = _EPOCH_FILE_RE.match(basename)
+        epoch_num = int(m.group(1)) if m else len(out)
+        out.append(
+            RvEpoch(
+                basename=basename,
+                epoch_num=epoch_num,
+                mjd=mjd,
+                rv_kms=rv,
+                err_kms=err if math.isfinite(err) and err > 0 else float("nan"),
+            )
+        )
+    out.sort(key=lambda e: e.epoch_num)
+    return out
+
+
+def parse_rv_epochs_from_summary(summary_path: Path) -> list[RvEpoch]:
+    """Pipeline results first, else legacy file summary block."""
+    epochs = parse_pipeline_rv_epochs(summary_path)
+    if epochs:
+        return epochs
+    return parse_legacy_file_summary_rv_epochs(summary_path)
+
+
 def parse_pipeline_rv_epochs(summary_path: Path) -> list[RvEpoch]:
     """Parse [PIPELINE RESULTS] rows with finite RV measurements."""
     text = summary_path.read_text(encoding="utf-8", errors="replace")
@@ -109,6 +164,13 @@ def stellar_priors_from_summary_metadata(meta: dict) -> dict:
     mh = _float_or_nan(meta.get("MH"))
     plx = _float_or_nan(meta.get("Parallax"))
     plx_err = _float_or_nan(meta.get("Parallax_Error"))
+    mass_flame = _float_or_nan(meta.get("Mass_FLAME"))
+    age_flame = _float_or_nan(meta.get("Age_FLAME"))
+
+    ra = _float_or_nan(meta.get("RA"))
+    dec = _float_or_nan(meta.get("Dec"))
+
+    mass_init = mass_flame if math.isfinite(mass_flame) and mass_flame > 0.0 else 1.0
 
     out: dict = {
         "Teff": teff if math.isfinite(teff) else 5500.0,
@@ -116,8 +178,17 @@ def stellar_priors_from_summary_metadata(meta: dict) -> dict:
         "[Fe/H]": mh if math.isfinite(mh) else 0.0,
         "[a/Fe]": -0.2,
         "log(R)": 0.0,
-        "Mass": 1.0,
+        "Mass": mass_init,
     }
+    if math.isfinite(age_flame) and age_flame > 0.0:
+        out["Age_Gyr"] = float(age_flame)
+    flags_flame = meta.get("Flags_FLAME")
+    if flags_flame is not None and str(flags_flame).strip() not in ("", "None", "nan"):
+        out["Flags_FLAME"] = str(flags_flame).strip()
+    if math.isfinite(ra):
+        out["RA"] = ra
+    if math.isfinite(dec):
+        out["Dec"] = dec
 
     if not math.isfinite(plx) or plx <= 0:
         raise ValueError("Summary metadata missing positive Parallax")

@@ -116,7 +116,7 @@ def summarize_samples_fits(
     for col in samples.colnames:
         if col in parameters:
             continue
-        if _VRAD_RE.match(str(col)) or str(col).startswith("specjitter_"):
+        if _VRAD_RE.match(str(col)) or str(col).startswith(("specjitter_", "lsf_", "pc")):
             stats = _summarize_column(samples, col)
             if stats is not None:
                 parameters[col] = stats

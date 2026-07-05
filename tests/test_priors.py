@@ -35,6 +35,24 @@ def test_build_vrad_prior_respects_floor():
     assert pr["vrad_0"][1][1] == 2.0
 
 
+def test_stellar_priors_flame_mass_and_age():
+    meta = {
+        "Teff": 5788.0,
+        "logg": 4.17,
+        "MH": -0.64,
+        "Parallax": 11.41,
+        "Parallax_Error": 0.032,
+        "Mass_FLAME": 1.05,
+        "Age_FLAME": 2.3,
+        "Flags_FLAME": "00",
+    }
+    out = priors.stellar_priors_from_summary_metadata(meta)
+    assert out["Mass"] == pytest.approx(1.05)
+    assert out["Age_Gyr"] == pytest.approx(2.3)
+    assert out["[Fe/H]"] == pytest.approx(-0.64)
+    assert out["Flags_FLAME"] == "00"
+
+
 def test_match_rv_epochs_to_spectrum_paths():
     epochs = [
         priors.RvEpoch("Gaia_DR3_1_epoch_2.txt", 2, 1.0, 10.0, 1.0),

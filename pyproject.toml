@@ -19,6 +19,8 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
+dust = ["dustmaps>=1.0.10"]
+plot = ["matplotlib>=3.8"]
 
 [project.scripts]
 darkhunter-sed = "darkhunter_sed.cli:main"

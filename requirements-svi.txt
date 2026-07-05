@@ -1,0 +1,6 @@
+# Pinned JAX stack for uberMS SVI (local macOS conda / ziggy gaia-env).
+# Install into the same env as uberMS + Payne + MISTy (not via dark-hunter-sed pyproject).
+jax==0.5.2
+jaxlib==0.5.1
+numpyro==0.15.0
+optax>=0.2.0
