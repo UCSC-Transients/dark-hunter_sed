@@ -22,6 +22,7 @@ from darkhunter_sed.config import (
     sed_summaries_dir,
     spec_root,
 )
+from darkhunter_sed.region_picker import resolve_regions_json_for_star
 from darkhunter_sed.stellar_data import photometry_fits_path
 
 logger = logging.getLogger(__name__)
@@ -69,10 +70,12 @@ def newest_input_mtime(
     spec_paths: list[Path],
     summary: Path | None,
     phot: Path | None,
+    regions_json: Path | None = None,
 ) -> float:
     mtimes = [_mtime(p) for p in spec_paths]
     mtimes.append(_mtime(summary))
     mtimes.append(_mtime(phot))
+    mtimes.append(_mtime(regions_json))
     return max(mtimes) if mtimes else 0.0
 
 
@@ -92,6 +95,9 @@ def needs_update(
     phot_dir: Path,
     rv_out: Path,
     force: bool = False,
+    regions_json: Path | None = None,
+    auto_resolve_regions: bool = True,
+    auto_gather_photometry: bool = True,
 ) -> tuple[bool, str]:
     if force:
         return True, "force"
@@ -102,9 +108,16 @@ def needs_update(
     if len(spec_paths) < 2:
         return False, f"need >=2 epoch spectra (have {len(spec_paths)})"
     if phot is None:
+        if auto_gather_photometry:
+            return True, "missing photometry (will gather)"
         return False, "missing photometry FITS"
 
-    in_m = newest_input_mtime(spec_paths, summary, phot)
+    resolved_regions = resolve_regions_json_for_star(
+        gaia_id,
+        regions_json,
+        auto_resolve=auto_resolve_regions,
+    )
+    in_m = newest_input_mtime(spec_paths, summary, phot, resolved_regions)
     out_m = newest_output_mtime(gaia_id)
     json_path = posterior.sed_summary_path(gaia_id)
 
@@ -130,6 +143,9 @@ def fit_one_star(
     vrad_err_inflate: float = 2.0,
     vrad_err_floor_kms: float = 2.0,
     phot_outlier_sigma: float | None = 3.0,
+    regions_json: Path | None = None,
+    auto_resolve_regions: bool = True,
+    auto_gather_photometry: bool = True,
 ) -> dict[str, Path]:
     """Run SED fit + write sed_summary.json for one Gaia source."""
     spec_root_path = spec_root_path or spec_root()
@@ -139,15 +155,11 @@ def fit_one_star(
     models.init_stellar_stack()
     _, phot_nn, _ = models.model_paths()
 
-    spec_paths, summary, phot = input_paths_for_star(
+    spec_paths, summary, _phot = input_paths_for_star(
         gaia_id, spec_root_path=spec_root_path, phot_dir=phot_dir, rv_out=rv_out
     )
     if not spec_paths:
         raise FileNotFoundError(f"No spectra under {spec_root_path} for {gaia_id}")
-    if phot is None:
-        raise FileNotFoundError(
-            f"Photometry not found: {photometry_fits_path(gaia_id, phot_dir)}"
-        )
 
     fit_data = data.getdata(
         gaia_id,
@@ -157,6 +169,9 @@ def fit_one_star(
         summary_path=summary,
         force_redownload=force_redownload,
         phot_outlier_sigma=phot_outlier_sigma,
+        regions_json=regions_json,
+        auto_resolve_regions=auto_resolve_regions,
+        auto_gather_photometry=auto_gather_photometry,
     )
 
     run_ums = do_ums
@@ -179,15 +194,20 @@ def fit_one_star(
         vrad_err_floor_kms=vrad_err_floor_kms,
     )
 
+    phot_path = Path(photometry_fits_path(gaia_id, phot_dir))
+    extra: dict = {
+        "n_epoch_spectra": len(spec_paths),
+        "rv_summary": str(summary.resolve()) if summary else None,
+        "photometry_fits": str(phot_path.resolve()) if phot_path.is_file() else None,
+    }
+    if fit_data.get("regions_json"):
+        extra["regions_json"] = fit_data["regions_json"]
+
     json_path = posterior.write_sed_summary(
         gaia_id,
         ums_samples=sample_paths.get("ums"),
         utp_samples=sample_paths.get("utp"),
-        extra={
-            "n_epoch_spectra": len(spec_paths),
-            "rv_summary": str(summary.resolve()) if summary else None,
-            "photometry_fits": str(phot.resolve()),
-        },
+        extra=extra,
     )
     sample_paths["sed_summary"] = json_path
     return sample_paths
@@ -223,14 +243,13 @@ def run_batch(
                 phot_dir=phot_dir,
                 rv_out=rv_out,
                 force=False,
+                regions_json=fit_kwargs.get("regions_json"),
+                auto_resolve_regions=fit_kwargs.get("auto_resolve_regions", True),
+                auto_gather_photometry=fit_kwargs.get("auto_gather_photometry", True),
             )
             if not ok:
-                if reason == "up to date":
-                    logger.info("skip %s (%s)", gid, reason)
-                    stats.skipped += 1
-                else:
-                    logger.info("skip %s (%s)", gid, reason)
-                    stats.skipped += 1
+                logger.info("skip %s (%s)", gid, reason)
+                stats.skipped += 1
                 continue
 
         logger.info("fitting %s (%d/%d)", gid, i + 1, len(gaia_ids))
@@ -286,6 +305,22 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help=f"Spectrum tree (default {spec_root()})",
     )
+    parser.add_argument(
+        "--regions-json",
+        type=Path,
+        default=None,
+        help="Shared regions/blaze JSON for all stars in this batch (overrides per-star auto)",
+    )
+    parser.add_argument(
+        "--no-auto-regions",
+        action="store_true",
+        help="Do not auto-resolve per-star regions JSON from output/masks/",
+    )
+    parser.add_argument(
+        "--no-auto-gather-phot",
+        action="store_true",
+        help="Do not query catalogs when photometry FITS is missing",
+    )
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args(argv)
 
@@ -304,6 +339,9 @@ def main(argv: list[str] | None = None) -> int:
         do_utp=not args.ums_only,
         force_redownload=args.force_redownload,
         progressbar=not args.no_progress,
+        regions_json=args.regions_json,
+        auto_resolve_regions=not args.no_auto_regions,
+        auto_gather_photometry=not args.no_auto_gather_phot,
     )
 
     print(

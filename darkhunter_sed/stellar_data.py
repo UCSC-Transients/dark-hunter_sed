@@ -43,6 +43,11 @@ def _sanitize_xla_flags_env() -> None:
         os.environ.pop("XLA_FLAGS", None)
 
 
+def sanitize_xla_flags_env() -> None:
+    """Public entry point; see :func:`_sanitize_xla_flags_env`."""
+    _sanitize_xla_flags_env()
+
+
 _sanitize_xla_flags_env()
 
 
@@ -202,9 +207,9 @@ def resolve_models_dir(root: Path | None = None) -> Path:
     env_models = models_dir()
     candidates = [env_models, root / "gaia" / "models", root / "models"]
     for c in candidates:
-        if c.is_dir():
+        if c is not None and c.is_dir():
             return c.resolve()
-    tried = "\n  ".join(str(c.resolve()) for c in candidates)
+    tried = "\n  ".join(str(c.resolve()) for c in candidates if c is not None)
     raise FileNotFoundError(
         "No models directory found. Tried:\n  "
         f"{tried}\n"
@@ -732,6 +737,8 @@ def _query_gaia_stellar_priors_fallback(gaia_id: int | str, *, sync_url: str) ->
             teff_gspphot,
             logg_gspphot,
             mh_gspphot,
+            ra,
+            dec,
             parallax,
             parallax_error
         FROM gaiadr3.gaia_source
@@ -746,6 +753,8 @@ def _query_gaia_stellar_priors_fallback(gaia_id: int | str, *, sync_url: str) ->
     teff = gs["teff_gspphot"][0]
     logg = gs["logg_gspphot"][0]
     mh = gs["mh_gspphot"][0]
+    ra = _float_field(gs["ra"][0])
+    dec = _float_field(gs["dec"][0])
     g_plx = _float_field(gs["parallax"][0])
     g_err = _float_field(gs["parallax_error"][0])
 
@@ -773,11 +782,13 @@ def _query_gaia_stellar_priors_fallback(gaia_id: int | str, *, sync_url: str) ->
 
     final_plx, final_err = pair
     return Table(
-        rows=[[teff, logg, mh, final_plx, final_err]],
+        rows=[[teff, logg, mh, ra, dec, final_plx, final_err]],
         names=[
             "teff_gspphot",
             "logg_gspphot",
             "mh_gspphot",
+            "ra",
+            "dec",
             "final_parallax",
             "final_parallax_error",
         ],
@@ -807,10 +818,17 @@ def query_gaia_stellar_priors(gaia_id: int | str) -> dict:
             gs.teff_gspphot,
             gs.logg_gspphot,
             gs.mh_gspphot,
+            gs.ra,
+            gs.dec,
+            ap.mass_flame,
+            ap.age_flame,
+            ap.flags_flame,
             COALESCE(nss_2b.parallax, nss_acc.parallax, gs.parallax) AS final_parallax,
             COALESCE(nss_2b.parallax_error, nss_acc.parallax_error, gs.parallax_error)
                 AS final_parallax_error
         FROM gaiadr3.gaia_source AS gs
+        LEFT JOIN gaiadr3.astrophysical_parameters AS ap
+            ON gs.source_id = ap.source_id
         LEFT JOIN gaiadr3.nss_two_body_orbit AS nss_2b
             ON gs.source_id = nss_2b.source_id
         LEFT JOIN gaiadr3.nss_acceleration_astro AS nss_acc
@@ -877,7 +895,15 @@ def query_gaia_stellar_priors(gaia_id: int | str) -> dict:
     out["[Fe/H]"] = _float_field(result["mh_gspphot"][0])
     out["[a/Fe]"] = -0.2
     out["log(R)"] = 0.0
-    out["Mass"] = 1.0
+    mass_flame = _float_field(result["mass_flame"][0]) if "mass_flame" in result.colnames else float("nan")
+    age_flame = _float_field(result["age_flame"][0]) if "age_flame" in result.colnames else float("nan")
+    out["Mass"] = mass_flame if math.isfinite(mass_flame) and mass_flame > 0.0 else 1.0
+    if math.isfinite(age_flame) and age_flame > 0.0:
+        out["Age_Gyr"] = float(age_flame)
+    if "flags_flame" in result.colnames:
+        flag = result["flags_flame"][0]
+        if flag is not None and str(flag).strip() not in ("", "None"):
+            out["Flags_FLAME"] = str(flag).strip()
 
     plx = _float_field(result["final_parallax"][0])
     plx_err = _float_field(result["final_parallax_error"][0])
@@ -894,6 +920,13 @@ def query_gaia_stellar_priors(gaia_id: int | str) -> dict:
             "uberMS needs [parallax, parallax_error] for the distance prior."
         )
     out["parallax"] = [plx, plx_err]
+
+    ra = _float_field(result["ra"][0])
+    dec = _float_field(result["dec"][0])
+    if math.isfinite(ra):
+        out["RA"] = ra
+    if math.isfinite(dec):
+        out["Dec"] = dec
 
     if math.isnan(out["Teff"]):
         out["Teff"] = 5500.0
