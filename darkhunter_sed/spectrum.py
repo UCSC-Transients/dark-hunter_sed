@@ -31,7 +31,15 @@ from darkhunter_sed.stellar_data import import_airtovacuum
 
 logger = logging.getLogger(__name__)
 
-airtovacuum = import_airtovacuum()
+_airtovacuum_fn = None
+
+
+def _airtovacuum(wavelength: np.ndarray) -> np.ndarray:
+    """Lazy airtovacuum; ThePayne is optional until coalescing runs."""
+    global _airtovacuum_fn
+    if _airtovacuum_fn is None:
+        _airtovacuum_fn = import_airtovacuum()
+    return _airtovacuum_fn(wavelength)
 
 _DEFAULT_WAVE_RANGE = (5150.0, 5300.0)
 _EPOCH_NUM_RE = re.compile(r"epoch_(\d+)", re.I)
@@ -266,7 +274,7 @@ def process_apf_txt_spectrum(
     if waves.size == 0:
         raise ValueError(f"No flux in {wave_min}–{wave_max} Å after normalization: {txt_path}")
 
-    waves = airtovacuum(waves)
+    waves = _airtovacuum(waves)
     medflux = float(np.nanmedian(fluxes))
     if not np.isfinite(medflux) or medflux == 0.0:
         raise ValueError(f"Invalid median flux after normalization: {txt_path}")
@@ -320,7 +328,7 @@ def process_spectrum_fits(
     wmin, wmax = wave_range
     m = (spec["wave"] > wmin) & (spec["wave"] < wmax)
     spec = spec[m]
-    spec["wave"] = airtovacuum(spec["wave"])
+    spec["wave"] = _airtovacuum(spec["wave"])
     medflux = float(np.nanmedian(spec["flux"]))
     spec["flux"] /= medflux
     spec["eflux"] /= medflux
