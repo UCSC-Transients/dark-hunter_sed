@@ -11,9 +11,22 @@ from astropy.io import fits
 from astropy.table import Table
 
 from darkhunter_rv import continuum, io_utils
-from darkhunter_rv.blaze import BlazeCalibration
+from darkhunter_rv.blaze import BlazeCalibration, strong_lines_in_span
 
-from darkhunter_sed.config import blaze_calibration_path
+from darkhunter_sed.config import (
+    SPECTRUM_ORDER_END_DEV_TOL,
+    SPECTRUM_ORDER_END_MIN_PIXELS,
+    blaze_calibration_path,
+)
+from darkhunter_sed.region_picker import (
+    OrderRegions,
+    build_manual_base_mask,
+    fit_model_from_regions,
+    load_regions_json,
+    order_blaze_model_from_regions,
+    order_regions_from_doc,
+    poly_order_from_regions,
+)
 from darkhunter_sed.stellar_data import import_airtovacuum
 
 logger = logging.getLogger(__name__)
@@ -32,10 +45,54 @@ def load_blaze_calibration(path: Path | None = None) -> BlazeCalibration | None:
     return BlazeCalibration.load(p)
 
 
+def _trim_normalized_order_ends(
+    wavelength: np.ndarray,
+    flux: np.ndarray,
+    eflux: np.ndarray,
+    *,
+    dev_tol: float = SPECTRUM_ORDER_END_DEV_TOL,
+    min_pixels: int = SPECTRUM_ORDER_END_MIN_PIXELS,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Peel noisy blaze-normalized pixels from both order ends.
+
+    Overlap wings often rise to ~1.05 after per-order normalization. Trim from each
+    end while ``|flux - 1| > dev_tol``; stop once a pixel is within tolerance. Keep at
+    least ``min_pixels``; if trimming would drop below that, return the order untrimmed.
+    """
+    w = np.asarray(wavelength, float)
+    f = np.asarray(flux, float)
+    e = np.asarray(eflux, float)
+    n = w.size
+    if n <= int(min_pixels):
+        return w, f, e
+
+    dev = np.abs(f - 1.0)
+    lo = 0
+    while lo < n and (not np.isfinite(f[lo]) or dev[lo] > dev_tol):
+        lo += 1
+    hi = n - 1
+    while hi > lo and (not np.isfinite(f[hi]) or dev[hi] > dev_tol):
+        hi -= 1
+
+    if hi - lo + 1 < int(min_pixels):
+        logger.debug("order-end trim would leave <%d px; keeping full order", min_pixels)
+        return w, f, e
+    sl = slice(lo, hi + 1)
+    return w[sl], f[sl], e[sl]
+
+
 def _coalesce_segments(
     segments: list[tuple[np.ndarray, np.ndarray, np.ndarray]],
     dedup_tol: float = 5e-3,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Merge overlapping order segments to a 1D spectrum.
+
+    Duplicate wavelengths (within ``dedup_tol``) collapse via inverse-variance
+    weighting (``w = 1/eflux**2``): low-error pixels dominate the merged flux and the
+    combined error is ``sqrt(1/sum(w))``.
+    """
     waves_list: list[float] = []
     flux_list: list[float] = []
     e_list: list[float] = []
@@ -98,15 +155,48 @@ def normalize_order_chunk(
     echelle_order: int,
     blaze_calibration: BlazeCalibration | None,
     continuum_mode: str = "sinc_blaze_only",
+    order_regions: OrderRegions | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """RV pipeline continuum + CR despike on one echelle order."""
     mode = continuum_mode
-    blaze_model = None
+    w = np.asarray(wavelength, dtype=float)
+    f = np.asarray(flux, dtype=float)
+    fallback = None
     if blaze_calibration is not None:
-        blaze_model = blaze_calibration.model_for_order(int(echelle_order))
+        fallback = blaze_calibration.model_for_order(int(echelle_order))
+    blaze_model = order_blaze_model_from_regions(
+        order_regions,
+        int(echelle_order),
+        w,
+        fallback,
+    )
     if blaze_model is None and mode.startswith("sinc_blaze"):
         mode = "spline"
         logger.debug("Order %s: no blaze model; spline continuum", echelle_order)
+
+    mask_kwargs: dict = {}
+    fit_kwargs: dict = {}
+    if order_regions is not None and mode.startswith("sinc_blaze") and blaze_model is not None:
+        rests = strong_lines_in_span(float(np.min(w)), float(np.max(w)))
+        if order_regions.get("continuum_regions") or order_regions.get("line_regions"):
+            bundle = build_manual_base_mask(
+                w,
+                f,
+                continuum_regions=order_regions.get("continuum_regions"),
+                line_regions=order_regions.get("line_regions"),
+                rest_lines=rests if rests else None,
+                half_width_angstrom=blaze_model.line_mask_half_width_angstrom,
+            )
+            mask_kwargs = {
+                "base_mask": bundle.base_mask,
+                "fixed_line_mask": bundle.fixed_line_mask,
+                "fixed_cont_mask": bundle.fixed_cont_mask,
+                "cr_mask": bundle.cr_mask,
+            }
+        fit_kwargs = {
+            "fit_model": fit_model_from_regions(order_regions),
+            "poly_order": poly_order_from_regions(order_regions),
+        }
 
     nw, nf, ne = continuum.fit_continuum(
         wavelength,
@@ -115,6 +205,8 @@ def normalize_order_chunk(
         continuum_mode=mode,
         blaze_model=blaze_model,
         echelle_order=int(echelle_order),
+        **mask_kwargs,
+        **fit_kwargs,
     )
     return continuum.despike_normalized_pre_ccf(nw, nf, ne)
 
@@ -126,6 +218,7 @@ def process_apf_txt_spectrum(
     blaze_calibration: BlazeCalibration | None = None,
     continuum_mode: str = "sinc_blaze_only",
     dedup_tol: float = 5e-3,
+    regions_json: str | Path | None = None,
 ) -> dict[str, np.ndarray]:
     """
     Read APF Gaia export, normalize per order (RV blaze + CR rejection), coalesce to 1D.
@@ -137,6 +230,11 @@ def process_apf_txt_spectrum(
     if blaze_calibration is None:
         blaze_calibration = load_blaze_calibration()
 
+    regions_doc: dict | None = None
+    if regions_json is not None:
+        regions_doc = load_regions_json(regions_json)
+        logger.info("Using manual regions from %s", regions_json)
+
     wave_min, wave_max = wave_range
     segments: list[tuple[np.ndarray, np.ndarray, np.ndarray]] = []
 
@@ -147,6 +245,9 @@ def process_apf_txt_spectrum(
             continue
         f = np.asarray(order["flux"], dtype=float)
         e = np.asarray(order["eflux"], dtype=float)
+        order_regions = (
+            order_regions_from_doc(regions_doc, int(order_num)) if regions_doc else None
+        )
         nw, nf, ne = normalize_order_chunk(
             w,
             f,
@@ -154,10 +255,12 @@ def process_apf_txt_spectrum(
             echelle_order=int(order_num),
             blaze_calibration=blaze_calibration,
             continuum_mode=continuum_mode,
+            order_regions=order_regions,
         )
         m = (nw >= wave_min) & (nw <= wave_max)
         if np.any(m):
-            segments.append((nw[m], nf[m], ne[m]))
+            tw, tf, te = _trim_normalized_order_ends(nw[m], nf[m], ne[m])
+            segments.append((tw, tf, te))
 
     waves, fluxes, efluxes = _coalesce_segments(segments, dedup_tol=dedup_tol)
     if waves.size == 0:
