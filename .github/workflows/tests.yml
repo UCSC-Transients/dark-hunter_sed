@@ -13,7 +13,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: UCSC-Transients/dark-hunter_rv
-          ref: feature/shared-blaze-sed
           path: dark-hunter_rv
       - uses: actions/setup-python@v5
         with:
