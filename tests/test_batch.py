@@ -91,6 +91,31 @@ def test_needs_update_skips_when_outputs_newer(tmp_path, monkeypatch):
     assert reason == "up to date"
 
 
+def test_needs_update_single_epoch_allowed(tmp_path, monkeypatch):
+    gid = "42"
+    spec_root_path = tmp_path / "spec"
+    phot_dir = tmp_path / "phot"
+    rv_out = tmp_path / "rv"
+    spec_dir = spec_root_path / f"Gaia_DR3_{gid}"
+    spec_dir.mkdir(parents=True)
+    phot_dir.mkdir(parents=True)
+
+    (spec_dir / f"Gaia_DR3_{gid}_epoch_1.txt").write_text("# Order 1\n5000 1.0\n")
+    (phot_dir / f"{gid}_phot.fits").write_bytes(b"x")
+
+    monkeypatch.setattr(sed_config, "samples_dir", lambda: tmp_path / "samples")
+    monkeypatch.setattr(sed_config, "sed_summaries_dir", lambda: tmp_path / "sed_summaries")
+
+    ok, reason = batch.needs_update(
+        gid,
+        spec_root_path=spec_root_path,
+        phot_dir=phot_dir,
+        rv_out=rv_out,
+    )
+    assert ok is True
+    assert reason == "no prior sed_summary"
+
+
 def test_needs_update_missing_phot_with_auto_gather(tmp_path, monkeypatch):
     gid = "2254791692199089536"
     spec_root_path = tmp_path / "spec"

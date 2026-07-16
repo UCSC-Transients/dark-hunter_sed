@@ -44,4 +44,11 @@ echo "=== SED batch --update ==="
 "$PY" -m darkhunter_sed.batch --update --no-progress \
   || echo "[WARN] SED batch had errors (see log)"
 
+echo "=== push_m1 --all ==="
+DATA_CSV="${DATA_CSV:-/var/www/html/darkhunter/rv/tables/data.csv}"
+"$PY" -m darkhunter_sed.push_m1 --all \
+  --rv-output-dir "$DARKHUNTER_OUTPUT_DIR" \
+  --data-csv "$DATA_CSV" \
+  || echo "[WARN] push_m1 had errors (see log)"
+
 echo "=== $(date -Is) cron_update_sed done ==="

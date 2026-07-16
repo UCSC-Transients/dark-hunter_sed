@@ -286,6 +286,22 @@ Gaia priors default to summary [GAIA METADATA]; use --force-redownload to re-que
         print(f"{kind.upper()} samples: {path}")
     print(f"SED summary: {json_path}")
 
+    if "ums" in results:
+        try:
+            from darkhunter_sed.push_m1 import push_m1_for_gaia_id
+
+            push_result = push_m1_for_gaia_id(args.gaia_id)
+            if push_result.get("ok"):
+                print(
+                    f"push_m1: M1={push_result['m1_msun']:.5f} "
+                    f"summary_updated={push_result['summary_updated']} "
+                    f"csv_updated={push_result['csv_updated']}"
+                )
+            else:
+                print(f"push_m1 skipped: {push_result.get('reason')}", file=sys.stderr)
+        except Exception as exc:
+            print(f"push_m1 failed: {exc}", file=sys.stderr)
+
     if args.plot:
         sed_summary = posterior.read_sed_summary(json_path)
         if args.plot_simple:
