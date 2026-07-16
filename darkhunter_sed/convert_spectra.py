@@ -79,7 +79,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if len(paths) < 2:
         print(
-            "Note: uberMS UMS (dva) requires at least 2 epoch spectra.",
+            "Note: uberMS UMS (dva) supports single-epoch fits.",
             file=sys.stderr,
         )
     return 0

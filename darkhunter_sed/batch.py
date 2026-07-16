@@ -105,8 +105,8 @@ def needs_update(
     spec_paths, summary, phot = input_paths_for_star(
         gaia_id, spec_root_path=spec_root_path, phot_dir=phot_dir, rv_out=rv_out
     )
-    if len(spec_paths) < 2:
-        return False, f"need >=2 epoch spectra (have {len(spec_paths)})"
+    if len(spec_paths) < 1:
+        return False, "need >=1 epoch spectrum (have 0)"
     if phot is None:
         if auto_gather_photometry:
             return True, "missing photometry (will gather)"
@@ -210,6 +210,23 @@ def fit_one_star(
         extra=extra,
     )
     sample_paths["sed_summary"] = json_path
+    if sample_paths.get("ums") is not None:
+        try:
+            from darkhunter_sed.push_m1 import push_m1_for_gaia_id
+
+            push_result = push_m1_for_gaia_id(gaia_id)
+            if not push_result.get("ok"):
+                logger.warning("push_m1 %s: %s", gaia_id, push_result.get("reason"))
+            else:
+                logger.info(
+                    "push_m1 %s M1=%.5f summary=%s csv=%s",
+                    gaia_id,
+                    push_result["m1_msun"],
+                    push_result["summary_updated"],
+                    push_result["csv_updated"],
+                )
+        except Exception as exc:
+            logger.warning("push_m1 failed for %s: %s", gaia_id, exc)
     return sample_paths
 
 

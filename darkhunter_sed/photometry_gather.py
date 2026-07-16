@@ -160,6 +160,9 @@ def query_catalogs(source_id, radius=3, ps1_vizier_epoch_jyear=PS1_VIZIER_DEFAUL
     Otherwise query Vizier II/349 at the Gaia position propagated from
     ``ref_epoch`` to ``ps1_vizier_epoch_jyear`` (default ~2011, PS1-era).
     """
+    if ps1_vizier_epoch_jyear is None:
+        ps1_vizier_epoch_jyear = PS1_VIZIER_DEFAULT_EPOCH_JY
+    ps1_vizier_epoch_jyear = float(ps1_vizier_epoch_jyear)
     radius = coord.Angle(radius, "arcsec")
     photometry = []
 
@@ -299,7 +302,7 @@ def query_catalogs(source_id, radius=3, ps1_vizier_epoch_jyear=PS1_VIZIER_DEFAUL
         print(
             "Pan-STARRS: no archive join row; Vizier II/349 cone search at "
             "RA, Dec propagated from Gaia ref_epoch={:.3f} to J-year {:.3f}.".format(
-                ref_ep, float(ps1_vizier_epoch_jyear)
+                ref_ep, ps1_vizier_epoch_jyear
             )
         )
         Vizier.ROW_LIMIT = 1
@@ -367,6 +370,8 @@ def gather_photometry_for_star(
     phot_outlier_model: str = "blackbody",
 ) -> Path:
     """Query catalogs and write ``{source_id}_phot.fits``; returns output path."""
+    if ps1_vizier_epoch_jyear is None:
+        ps1_vizier_epoch_jyear = PS1_VIZIER_DEFAULT_EPOCH_JY
     photometry = query_catalogs(
         source_id,
         radius=ps1_radius,

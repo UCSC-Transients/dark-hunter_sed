@@ -27,6 +27,7 @@ darkhunter-sed = "darkhunter_sed.cli:main"
 darkhunter-sed-convert = "darkhunter_sed.convert_spectra:main"
 darkhunter-sed-gather-phot = "darkhunter_sed.photometry_gather:main"
 darkhunter-sed-batch = "darkhunter_sed.batch:main"
+darkhunter-sed-push-m1 = "darkhunter_sed.push_m1:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

@@ -78,10 +78,14 @@ def _samples_outfile(gaia_id: str, runtype: str, output_name: str | None = None)
 
 
 def preflight_ums(nspec: int, gaia_id: str) -> None:
-    if nspec < 2:
+    """
+    Validate UMS spectrum count.
+
+    uberMS.dva models support nspec>=1. Zero spectra is still invalid when dospec.
+    """
+    if nspec < 1:
         raise ValueError(
-            f"UMS (uberMS.dva.sviMS) requires at least 2 spectra for {gaia_id}; got {nspec}. "
-            "Collect another epoch or run UTP only."
+            f"UMS requires at least 1 spectrum for {gaia_id}; got {nspec}."
         )
 
 

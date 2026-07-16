@@ -166,7 +166,7 @@ python -m darkhunter_sed.batch --gaia-id <id> --force --no-progress
 
 - Refit when any epoch spectrum, photometry FITS, RV summary, or regions JSON is newer than
   `sed_summary.json` / sample FITS.
-- Skip stars with fewer than 2 epoch spectra (UMS requirement).
+- Skip stars with **zero** epoch spectra; **UMS runs with ≥1 spectrum** (dva supports nspec=1).
 - Stars without `{gaia_id}_phot.fits` are **refit candidates** when auto-gather is enabled (default); use `--no-auto-gather-phot` to skip them.
 
 ## Cron
@@ -174,10 +174,40 @@ python -m darkhunter_sed.batch --gaia-id <id> --force --no-progress
 After RV cron (`dark-hunter_rv/scripts/cron_update_rv_website.sh`):
 
 ```bash
+# Daily (ziggy example):
+#   30 10 * * * /bin/bash /data2/darkhunter/dark-hunter_sed/scripts/cron_update_sed.sh
 bash scripts/cron_update_sed.sh
 ```
 
+Runs `batch --update` then `push_m1 --all` (Phase 4 → summary + `data.csv` M1).
+
 Log: `$REPO/logs/cron_sed.log`
+
+Monthly (new spectra in last 30d → SED + Keplerian when ≥2 epochs):
+
+```bash
+#   0 11 1 * * /bin/bash /data2/darkhunter/dark-hunter_sed/scripts/cron_monthly_new_spectra.sh
+bash scripts/cron_monthly_new_spectra.sh
+```
+
+Log: `$REPO/logs/cron_monthly_sed_rv.log`
+
+## Screen: all-stars SED → M1 → RV refit
+
+```bash
+screen -dmS darkhunter_sed_m1_refit \
+  bash /data2/darkhunter/dark-hunter_sed/scripts/screen_sed_then_refit_rvs.sh
+# attach: screen -r darkhunter_sed_m1_refit
+```
+
+Force SED for all stars, `push_m1 --all`, then RV parallel Keplerian refit (`SKIP_SINGLE_EPOCH_FIT=1` skips orbit fit when n_spec&lt;2).
+
+## Epoch policy
+
+| n_epochs | SED | push_m1 | Keplerian RV fit |
+|----------|-----|---------|------------------|
+| 1 | UMS + UTP | yes (when UMS M1 exists) | skip |
+| ≥2 | UMS + UTP | yes | yes |
 
 ## Priors
 
@@ -223,7 +253,14 @@ Writes `output/plots/Gaia_DR3_<id>_ums.pdf` (and `_utp.pdf` if UTP ran) using th
 - `vrad_epochs` — per-epoch posterior RVs
 - `av_prior` — dust-map prior used at fit time (map name, bounds, distance)
 
-Phase 4 will push `m1_msun` into the RV website `tables/data.csv`.
+**Phase 4:** after a successful UMS fit, `cli` / `batch` call `python -m darkhunter_sed.push_m1`, which writes `M1` / `m1_msun` into the RV `summary.txt` `[GAIA METADATA]` and the website `tables/data.csv` column `M1 (Msun)`. Standalone:
+
+```bash
+python -m darkhunter_sed.push_m1 <gaia_id>
+python -m darkhunter_sed.push_m1 --all
+```
+
+Requires ziggy `STELLAR_ROOT` uberMS dva patched to allow `nspec=1` (see `~/stellar/uberMS` / `/data2/stellar/uberMS`).
 
 ## Model files
 
