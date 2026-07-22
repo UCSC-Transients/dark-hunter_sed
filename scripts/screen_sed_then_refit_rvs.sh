@@ -10,14 +10,14 @@ set -euo pipefail
 
 SED_REPO="${SED_REPO:-/data2/darkhunter/dark-hunter_sed}"
 RV_REPO="${RV_REPO:-/data2/darkhunter/dark-hunter_rv}"
-PY="${PY:-/home/marley/anaconda2/envs/gaia-env/bin/python}"
+PY="${PY:-/data2/darkhunter/.venv/bin/python}"
 if [[ ! -x "$PY" ]]; then
   PY="${PY_FALLBACK:-python3}"
 fi
 WEB_ROOT="${WEB_ROOT:-/var/www/html/darkhunter/rv}"
 DATA_CSV="${DATA_CSV:-$WEB_ROOT/tables/data.csv}"
 SPEC_ROOT="${SPEC_ROOT:-/data2/gaia_stars/apf_reductions}"
-STELLAR_ROOT="${STELLAR_ROOT:-/data2/stellar}"
+STELLAR_ROOT="${STELLAR_ROOT:-/data2/darkhunter/stellar}"
 JOBS="${JOBS:-4}"
 NICE_LEVEL="${NICE_LEVEL:-10}"
 PIPELINE_FORCE="${PIPELINE_FORCE:-0}"
@@ -28,7 +28,7 @@ SKIP_SINGLE_EPOCH_FIT="${SKIP_SINGLE_EPOCH_FIT:-1}"
 RUN_SED="${RUN_SED:-0}"  # SED already done in this script; skip inside refit workers
 
 export PY SED_REPO RV_REPO WEB_ROOT DATA_CSV SPEC_ROOT STELLAR_ROOT
-export PYTHONPATH="$RV_REPO:$SED_REPO${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH="$SED_REPO:$RV_REPO${PYTHONPATH:+:$PYTHONPATH}"
 export DARKHUNTER_OUTPUT_DIR="${DARKHUNTER_OUTPUT_DIR:-$RV_REPO/output}"
 export DARKHUNTER_SED_OUTPUT_DIR="${DARKHUNTER_SED_OUTPUT_DIR:-$SED_REPO/output}"
 export DARKHUNTER_SED_SAMPLES_DIR="${DARKHUNTER_SED_SAMPLES_DIR:-$SED_REPO/output/samples}"

@@ -88,31 +88,38 @@ python3 $RV_REPO/scripts/ensure_pipeline_summaries.py \
 
 ## Environment (ziggy)
 
-| Variable | Typical value |
-|----------|----------------|
-| `REPO` | `/data2/darkhunter/dark-hunter_sed` |
-| `RV_REPO` | `/data2/darkhunter/dark-hunter_rv` |
-| `STELLAR_ROOT` | `/data2/stellar` (uberMS, ThePayne, MISTy, models) |
-| `SPEC_ROOT` | `/data2/gaia_stars/apf_reductions` |
-| `DARKHUNTER_OUTPUT_DIR` | `$RV_REPO/output` |
-| `DARKHUNTER_SED_OUTPUT_DIR` | `$REPO/output` |
-| `DARKHUNTER_SED_MODELS_DIR` | optional override for NN weights |
-| `PY` | `gaia-env` python |
+Prefer one source (sets paths + `cd` to SED repo):
 
 ```bash
-export PYTHONPATH=$RV_REPO:$REPO
-export STELLAR_ROOT=/data2/stellar
-export SPEC_ROOT=/data2/gaia_stars/apf_reductions
-export DARKHUNTER_OUTPUT_DIR=$RV_REPO/output
+source /data2/darkhunter/dark-hunter_sed/scripts/activate_ziggy.sh
+# then e.g.:
+#   export GAIA_ID=<id>
+#   $PY -m darkhunter_sed.cli $GAIA_ID --from-spec-root
 ```
+
+| Variable | Typical value |
+|----------|----------------|
+| `SED_REPO` / `REPO` | `/data2/darkhunter/dark-hunter_sed` |
+| `RV_REPO` | `/data2/darkhunter/dark-hunter_rv` |
+| `STELLAR_ROOT` | `/data2/darkhunter/stellar` (uberMS, ThePayne, MISTy, models) |
+| `SPEC_ROOT` | `/data2/gaia_stars/apf_reductions` |
+| `DARKHUNTER_OUTPUT_DIR` | `$RV_REPO/output` |
+| `DARKHUNTER_SED_OUTPUT_DIR` | `$SED_REPO/output` (config default; usually unset) |
+| `DARKHUNTER_SED_MODELS_DIR` | only if models not under `$STELLAR_ROOT/{models,gaia/models}` |
+| `DATA_CSV` | `/var/www/html/darkhunter/rv/tables/data.csv` |
+| `PY` | `/data2/darkhunter/.venv/bin/python` |
+
+Override before source, e.g. `PY=/other/bin/python source …/activate_ziggy.sh`.
+
+Cron / screen scripts use the same defaults (no need to source activate inside cron).
 
 ## One-time photometry per star
 
 Photometry is **auto-gathered** on first `cli` / `batch` run when `{gaia_id}_phot.fits` is absent. To gather or refresh manually:
 
 ```bash
-cd $REPO
-python -m darkhunter_sed.photometry_gather <gaia_id> -d output/photometry
+$PY -m darkhunter_sed.photometry_gather <gaia_id>
+# default outdir: output/photometry (or DARKHUNTER_SED_PHOTOMETRY_DIR)
 ```
 
 Use `--no-auto-gather-phot` on `cli` or `batch` to require an existing FITS file.

@@ -13,8 +13,8 @@ set -euo pipefail
 REPO="${REPO:-/data2/darkhunter/dark-hunter_sed}"
 RV_REPO="${RV_REPO:-/data2/darkhunter/dark-hunter_rv}"
 SPEC_ROOT="${SPEC_ROOT:-/data2/gaia_stars/apf_reductions}"
-STELLAR_ROOT="${STELLAR_ROOT:-/data2/stellar}"
-PY="${PY:-/home/marley/anaconda2/envs/gaia-env/bin/python}"
+STELLAR_ROOT="${STELLAR_ROOT:-/data2/darkhunter/stellar}"
+PY="${PY:-/data2/darkhunter/.venv/bin/python}"
 if [[ ! -x "$PY" ]]; then
   PY="${PY_FALLBACK:-python3}"
 fi
@@ -23,7 +23,7 @@ LOG="${LOG:-$REPO/logs/cron_sed.log}"
 mkdir -p "$(dirname "$LOG")" "$REPO/output/sed_summaries" "$REPO/output/samples"
 cd "$REPO"
 
-export PYTHONPATH="$RV_REPO:$REPO${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH="$REPO:$RV_REPO${PYTHONPATH:+:$PYTHONPATH}"
 export STELLAR_ROOT
 export SPEC_ROOT
 export DARKHUNTER_OUTPUT_DIR="${DARKHUNTER_OUTPUT_DIR:-$RV_REPO/output}"
@@ -31,6 +31,7 @@ export DARKHUNTER_SED_OUTPUT_DIR="${DARKHUNTER_SED_OUTPUT_DIR:-$REPO/output}"
 export DARKHUNTER_SED_SAMPLES_DIR="${DARKHUNTER_SED_SAMPLES_DIR:-$REPO/output/samples}"
 export DARKHUNTER_SED_SUMMARIES_DIR="${DARKHUNTER_SED_SUMMARIES_DIR:-$REPO/output/sed_summaries}"
 export DARKHUNTER_SED_PHOTOMETRY_DIR="${DARKHUNTER_SED_PHOTOMETRY_DIR:-$REPO/output/photometry}"
+export DATA_CSV="${DATA_CSV:-/var/www/html/darkhunter/rv/tables/data.csv}"
 
 exec >>"$LOG" 2>&1
 echo "=== $(date -Is) cron_update_sed start (pid $$) ==="
@@ -45,7 +46,6 @@ echo "=== SED batch --update ==="
   || echo "[WARN] SED batch had errors (see log)"
 
 echo "=== push_m1 --all ==="
-DATA_CSV="${DATA_CSV:-/var/www/html/darkhunter/rv/tables/data.csv}"
 "$PY" -m darkhunter_sed.push_m1 --all \
   --rv-output-dir "$DARKHUNTER_OUTPUT_DIR" \
   --data-csv "$DATA_CSV" \
