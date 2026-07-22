@@ -11,6 +11,7 @@ from astropy.time import Time
 from astroquery.gaia import Gaia
 
 from darkhunter_sed import stellar_data
+from darkhunter_sed.config import photometry_dir
 from astroquery.ipac.irsa import Irsa
 from astroquery.sdss import SDSS
 from astroquery.mast import Catalogs
@@ -427,11 +428,13 @@ def ensure_photometry_fits(
 def main():
     parser = argparse.ArgumentParser(description="Gather multi-band photometry for a Gaia source_id.")
     parser.add_argument("source_id", help="Gaia DR3 source_id")
+    _default_phot_dir = photometry_dir()
     parser.add_argument(
         "--outdir",
         "-d",
-        default=None,
-        help="Directory for {source_id}_phot.fits (default: current directory)",
+        type=Path,
+        default=_default_phot_dir,
+        help=f"Directory for {{source_id}}_phot.fits (default: {_default_phot_dir})",
     )
     parser.add_argument(
         "--ps1-radius",

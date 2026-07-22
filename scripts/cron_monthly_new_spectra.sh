@@ -12,10 +12,10 @@ set -euo pipefail
 REPO="${REPO:-/data2/darkhunter/dark-hunter_sed}"
 RV_REPO="${RV_REPO:-/data2/darkhunter/dark-hunter_rv}"
 SPEC_ROOT="${SPEC_ROOT:-/data2/gaia_stars/apf_reductions}"
-STELLAR_ROOT="${STELLAR_ROOT:-/data2/stellar}"
+STELLAR_ROOT="${STELLAR_ROOT:-/data2/darkhunter/stellar}"
 WEB_ROOT="${WEB_ROOT:-/var/www/html/darkhunter/rv}"
 DATA_CSV="${DATA_CSV:-$WEB_ROOT/tables/data.csv}"
-PY="${PY:-/home/marley/anaconda2/envs/gaia-env/bin/python}"
+PY="${PY:-/data2/darkhunter/.venv/bin/python}"
 if [[ ! -x "$PY" ]]; then
   PY="${PY_FALLBACK:-python3}"
 fi
@@ -25,7 +25,7 @@ DAYS="${DAYS:-30}"
 mkdir -p "$(dirname "$LOG")" "$REPO/output/sed_summaries" "$REPO/output/samples"
 cd "$REPO"
 
-export PYTHONPATH="$RV_REPO:$REPO${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH="$REPO:$RV_REPO${PYTHONPATH:+:$PYTHONPATH}"
 export STELLAR_ROOT SPEC_ROOT DATA_CSV
 export DARKHUNTER_OUTPUT_DIR="${DARKHUNTER_OUTPUT_DIR:-$RV_REPO/output}"
 export DARKHUNTER_SED_OUTPUT_DIR="${DARKHUNTER_SED_OUTPUT_DIR:-$REPO/output}"
