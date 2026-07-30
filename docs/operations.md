@@ -219,8 +219,11 @@ Force SED for all stars, `push_m1 --all`, then RV parallel Keplerian refit (`SKI
 ## Priors
 
 - **RV:** per-epoch `vrad_i` normal priors from `[PIPELINE RESULTS]` (2× error inflation, 2 km/s floor by default). Legacy `# File Summary` rows are parsed when `[PIPELINE RESULTS]` is absent.
-- **Gaia:** from summary `[GAIA METADATA]`; `--force-redownload` on CLI/batch re-queries TAP.
-- **Av (extinction):** default dustmaps chain at parallax distance — Bayestar2019 → DECaPS → Edenhofer → Chen (3D); fallbacks Chen LOS upper limit → CSFD upper limit → legacy `tnormal(0,0.1,0,0.5)`. Disable with `--no-dust-av-prior`. Provenance stored in `sed_summary.json` as `av_prior`.
+- **Gaia:** from summary `[GAIA METADATA]`. Auto-requery TAP when Teff/logg/MH are NaN, parallax is invalid, summary is missing, or `--force-redownload`. Finite TAP fields are written back to the summary; still-NaN fields are **not** written (solar defaults apply in memory only: Teff=5500, log g=4, [Fe/H]=0, Mass=1).
+- **UMS sampling:** `initial_Mass` IMF `[0.3, 3.0] M☉`; `EEP` uniform `[1, 808]` (full MISTy grid). Gaia Teff is not a free parameter (MIST-derived).
+- **UTP sampling:** `Teff` uniform `[3500, 15000]` K.
+- **Parallax / distance:** Gaia parallax error is inflated by **2×** by default (`parallax_err_mult=2`) before building the distance prior.
+- **Av (extinction):** dustmaps chain at parallax distance — Bayestar2019 → DECaPS → Edenhofer → Chen (3D); fallbacks Chen LOS / CSFD / legacy. Dust and legacy Av prior **σ are ×2** vs the raw map / old legacy scale. Disable with `--no-dust-av-prior`. Provenance stored in `sed_summary.json` as `av_prior`.
 
 ### Dust map downloads (one-time per machine)
 

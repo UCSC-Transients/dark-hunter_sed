@@ -52,7 +52,7 @@ def test_tnormal_upper_limit():
     prior = dp._tnormal_upper_limit(0.3)
     loc, scale, low, high = prior[1]
     assert loc == 0.0
-    assert scale == pytest.approx(0.1)
+    assert scale == pytest.approx(0.2)  # (ul/3) * AV_SIGMA_INFLATE
     assert high == pytest.approx(0.3)
 
 
@@ -83,6 +83,8 @@ def test_build_av_prior_bayestar_chain():
     assert result.map_used == "bayestar2019"
     assert result.prior_kind == "informative_3d"
     assert result.a_v_med == pytest.approx(0.15)
+    assert result.sigma == pytest.approx(0.04)  # raw 0.02 * AV_SIGMA_INFLATE
+    assert result.prior[1][1] == pytest.approx(0.04)
 
 
 def test_build_av_prior_fallback_csfd():
@@ -96,6 +98,7 @@ def test_build_av_prior_fallback_csfd():
     assert result.map_used == "csfd"
     assert result.prior_kind == "upper_limit"
     assert result.prior[1][0] == 0.0
+    assert result.prior[1][1] == pytest.approx(0.05 * 2.0 / 3.0)
     assert result.prior[1][3] == pytest.approx(0.05)
 
 
@@ -107,6 +110,8 @@ def test_build_av_prior_legacy_when_disabled():
         use_dustmaps=False,
     )
     assert result.map_used == "legacy"
+    assert result.prior[1][1] == pytest.approx(0.2)
+    assert result.prior[1][3] == pytest.approx(1.0)
 
 
 def test_build_av_prior_from_fit_data():

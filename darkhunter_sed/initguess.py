@@ -68,7 +68,7 @@ def guess_eep_from_age(
     feh: float,
     afe: float,
     *,
-    eep_bounds: tuple[float, float] = (250.0, 500.0),
+    eep_bounds: tuple[float, float] = (1.0, 808.0),
     n_eep: int = 50,
     gen_mist_fn: Callable | None = None,
 ) -> float:

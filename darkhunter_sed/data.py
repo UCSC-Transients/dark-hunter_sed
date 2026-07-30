@@ -30,7 +30,7 @@ def _finalize_parallax_in_out(
     parallax_mas: float | None = None,
     parallax_error_mas: float | None = None,
     parallax_err_floor_mas: float | None = None,
-    parallax_err_mult: float = 1.0,
+    parallax_err_mult: float = 2.0,
     parallax_distance_factor: float = 1.0,
 ) -> None:
     pl0, pl1 = out["parallax"]
@@ -137,7 +137,7 @@ def getdata(
     parallax_mas: float | None = None,
     parallax_error_mas: float | None = None,
     parallax_err_floor_mas: float | None = None,
-    parallax_err_mult: float = 1.0,
+    parallax_err_mult: float = 2.0,
     parallax_distance_factor: float = 1.0,
     force_redownload: bool = False,
     summary_path: Path | None = None,

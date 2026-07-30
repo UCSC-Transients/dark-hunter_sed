@@ -198,6 +198,156 @@ def stellar_priors_from_summary_metadata(meta: dict) -> dict:
     return out
 
 
+def _meta_atmosphere_incomplete(meta: dict) -> bool:
+    """True when Teff, logg, or MH is missing/non-finite in summary metadata."""
+    for key in ("Teff", "logg", "MH"):
+        if not math.isfinite(_float_or_nan(meta.get(key))):
+            return True
+    return False
+
+
+def apply_solar_atmosphere_defaults(priors_dict: dict) -> dict:
+    """In-memory solar fill-ins for missing atmosphere labels (never written to disk)."""
+    out = dict(priors_dict)
+    teff = _float_or_nan(out.get("Teff"))
+    logg = _float_or_nan(out.get("log(g)"))
+    feh = _float_or_nan(out.get("[Fe/H]"))
+    mass = _float_or_nan(out.get("Mass"))
+    if not math.isfinite(teff):
+        out["Teff"] = 5500.0
+    if not math.isfinite(logg):
+        out["log(g)"] = 4.0
+    if not math.isfinite(feh):
+        out["[Fe/H]"] = 0.0
+    if not math.isfinite(mass) or mass <= 0.0:
+        out["Mass"] = 1.0
+    out.setdefault("[a/Fe]", -0.2)
+    out.setdefault("log(R)", 0.0)
+    return out
+
+
+def finite_gaia_metadata_updates(priors_dict: dict) -> dict[str, str]:
+    """
+    Map TAP prior fields to summary ``[GAIA METADATA]`` keys.
+
+    Only finite values are included (NaN must not be written to disk).
+    """
+    updates: dict[str, str] = {}
+
+    def _put_float(summary_key: str, val) -> None:
+        x = _float_or_nan(val)
+        if math.isfinite(x):
+            updates[summary_key] = f"{x:.8f}"
+
+    _put_float("Teff", priors_dict.get("Teff"))
+    _put_float("logg", priors_dict.get("log(g)"))
+    _put_float("MH", priors_dict.get("[Fe/H]"))
+    if "Mass_FLAME" in priors_dict:
+        _put_float("Mass_FLAME", priors_dict.get("Mass_FLAME"))
+    if "Age_FLAME" in priors_dict:
+        _put_float("Age_FLAME", priors_dict.get("Age_FLAME"))
+    elif "Age_Gyr" in priors_dict:
+        _put_float("Age_FLAME", priors_dict.get("Age_Gyr"))
+    _put_float("RA", priors_dict.get("RA"))
+    _put_float("Dec", priors_dict.get("Dec"))
+
+    plx = priors_dict.get("parallax")
+    if isinstance(plx, (list, tuple)) and len(plx) >= 2:
+        _put_float("Parallax", plx[0])
+        _put_float("Parallax_Error", plx[1])
+
+    flags = priors_dict.get("Flags_FLAME")
+    if flags is not None and str(flags).strip() not in ("", "None", "nan"):
+        updates["Flags_FLAME"] = str(flags).strip()
+
+    return updates
+
+
+def patch_gaia_metadata_fields(summary_path: Path, updates: dict[str, str]) -> bool:
+    """
+    Upsert finite key/value pairs into ``[GAIA METADATA]``.
+
+    Returns True if the file was modified. Empty ``updates`` is a no-op.
+    """
+    if not updates:
+        return False
+    if not summary_path.is_file():
+        logger.warning("summary missing: %s", summary_path)
+        return False
+
+    text = summary_path.read_text(encoding="utf-8")
+    lines = text.splitlines(keepends=True)
+    meta_start = None
+    meta_end = None
+    for i, line in enumerate(lines):
+        if line.strip() == "[GAIA METADATA]":
+            meta_start = i
+            continue
+        if meta_start is not None and meta_end is None:
+            s = line.strip()
+            if s.startswith("[") and s.endswith("]") and s != "[GAIA METADATA]":
+                meta_end = i
+                break
+    if meta_start is None:
+        logger.warning("no [GAIA METADATA] in %s", summary_path)
+        return False
+    if meta_end is None:
+        meta_end = len(lines)
+
+    body = lines[meta_start + 1 : meta_end]
+    kept: list[str] = []
+    seen: set[str] = set()
+    changed = False
+    for line in body:
+        raw = line.strip()
+        if not raw or raw.startswith("#") or ":" not in raw:
+            kept.append(line if line.endswith("\n") else line + "\n")
+            continue
+        key, _ = raw.split(":", 1)
+        key = key.strip()
+        if key in updates:
+            seen.add(key)
+            new_line = f"{key}: {updates[key]}\n"
+            if line.rstrip("\n") + "\n" != new_line:
+                changed = True
+            kept.append(new_line)
+        else:
+            kept.append(line if line.endswith("\n") else line + "\n")
+
+    for key, val in updates.items():
+        if key not in seen:
+            kept.append(f"{key}: {val}\n")
+            changed = True
+
+    if not changed:
+        return False
+
+    out_lines = lines[: meta_start + 1] + kept + lines[meta_end:]
+    summary_path.write_text("".join(out_lines), encoding="utf-8")
+    logger.info("Updated [GAIA METADATA] in %s (%s)", summary_path, ", ".join(sorted(updates)))
+    return True
+
+
+def _priors_from_tap(
+    gaia_id: str,
+    *,
+    summary_path: Path | None,
+    write_summary: bool,
+) -> dict:
+    """Query Gaia TAP, optionally patch finite fields to summary, apply solar defaults."""
+    tap = query_gaia_stellar_priors(gaia_id)
+    if write_summary and summary_path is not None:
+        updates = finite_gaia_metadata_updates(tap)
+        if updates:
+            patch_gaia_metadata_fields(summary_path, updates)
+        else:
+            logger.warning(
+                "Gaia TAP returned no finite metadata fields for %s; summary not updated",
+                gaia_id,
+            )
+    return apply_solar_atmosphere_defaults(tap)
+
+
 def load_stellar_priors(
     gaia_id: str,
     *,
@@ -208,33 +358,72 @@ def load_stellar_priors(
     """
     Stellar atmosphere + parallax priors.
 
-    Default: read ``[GAIA METADATA]`` from the RV summary. With ``force_redownload``,
-    query Gaia TAP via ``stellar_data.query_gaia_stellar_priors``.
+    Default: read ``[GAIA METADATA]`` from the RV summary. Re-query Gaia TAP when
+    ``force_redownload`` is set, the summary is missing/incomplete, parallax is
+    invalid, or Teff/logg/MH are NaN. Finite TAP fields are written back to the
+    summary; still-NaN fields are filled with solar defaults in memory only.
     """
+    rv_output = rv_output or rv_output_dir()
+    resolved_summary = summary_path or discover_summary_path(rv_output, gaia_id)
+
     if force_redownload:
         logger.info("Force redownload: querying Gaia for source_id %s", gaia_id)
-        return query_gaia_stellar_priors(gaia_id)
+        try:
+            return _priors_from_tap(
+                gaia_id, summary_path=resolved_summary, write_summary=True
+            )
+        except Exception as exc:
+            logger.warning("Force redownload failed for %s: %s", gaia_id, exc)
+            raise
 
-    rv_output = rv_output or rv_output_dir()
-    summary_path = summary_path or discover_summary_path(rv_output, gaia_id)
-    if summary_path is None or not summary_path.is_file():
+    if resolved_summary is None or not resolved_summary.is_file():
         logger.warning(
             "No RV summary for %s under %s; querying Gaia TAP",
             gaia_id,
             rv_output,
         )
-        return query_gaia_stellar_priors(gaia_id)
+        return _priors_from_tap(gaia_id, summary_path=None, write_summary=False)
 
-    meta = parse_gaia_metadata_from_star_summary(summary_path)
+    meta = parse_gaia_metadata_from_star_summary(resolved_summary)
     if meta is None or meta.get("Source_ID") is None:
-        logger.warning("Incomplete summary %s; querying Gaia TAP", summary_path)
-        return query_gaia_stellar_priors(gaia_id)
+        logger.warning("Incomplete summary %s; querying Gaia TAP", resolved_summary)
+        try:
+            return _priors_from_tap(
+                gaia_id, summary_path=resolved_summary, write_summary=True
+            )
+        except Exception as exc:
+            logger.warning("TAP failed after incomplete summary: %s", exc)
+            raise
 
+    need_tap = _meta_atmosphere_incomplete(meta)
+    summary_priors: dict | None = None
     try:
-        return stellar_priors_from_summary_metadata(meta)
+        summary_priors = stellar_priors_from_summary_metadata(meta)
     except ValueError as exc:
         logger.warning("%s; querying Gaia TAP", exc)
-        return query_gaia_stellar_priors(gaia_id)
+        need_tap = True
+
+    if need_tap:
+        logger.info(
+            "Re-querying Gaia TAP for %s (incomplete atmosphere and/or parallax)",
+            gaia_id,
+        )
+        try:
+            return _priors_from_tap(
+                gaia_id, summary_path=resolved_summary, write_summary=True
+            )
+        except Exception as exc:
+            logger.warning(
+                "Gaia TAP failed for %s (%s); using summary with solar atmosphere defaults",
+                gaia_id,
+                exc,
+            )
+            if summary_priors is not None:
+                return apply_solar_atmosphere_defaults(summary_priors)
+            # Summary lacked parallax and TAP failed — cannot proceed without distance prior.
+            raise
+
+    return apply_solar_atmosphere_defaults(summary_priors)
 
 
 def build_vrad_init_and_priors(
