@@ -13,7 +13,8 @@ logger = logging.getLogger(__name__)
 
 # Conversions use R_V=3.32 unless noted; Payne likelihood uses R_V=3.1 (documented mismatch).
 RV_DUST = 3.32
-LEGACY_AV_PRIOR: list = ["tnormal", [0.0, 0.1, 0.0, 0.5]]
+LEGACY_AV_PRIOR: list = ["tnormal", [0.0, 0.2, 0.0, 1.0]]
+AV_SIGMA_INFLATE = 2.0
 
 # GSF19 Table 1 (bayestar2019): A_V ≈ coeff * map_reddening at R_V=3.1.
 BAYESTAR2019_AV_COEFF = 2.271
@@ -81,9 +82,10 @@ def _tnormal_informative(loc: float, sigma: float) -> list:
 
 
 def _tnormal_upper_limit(a_v_ul: float) -> list:
-    """Upper-limit prior: loc=0, scale=ul/3, high=ul."""
+    """Upper-limit prior: loc=0, scale=2*(ul/3) with AV_SIGMA_INFLATE, high=ul."""
     ul = max(float(a_v_ul), 1e-6)
-    return ["tnormal", [0.0, ul / 3.0, 0.0, ul]]
+    scale = (ul / 3.0) * float(AV_SIGMA_INFLATE)
+    return ["tnormal", [0.0, scale, 0.0, ul]]
 
 
 def _init_from_prior(prior: list) -> float:
@@ -379,17 +381,17 @@ def build_av_prior(
         med, sigma = pair
         if med is None or not math.isfinite(med):
             continue
-        prior = _tnormal_informative(med, sigma)
+        prior = _tnormal_informative(med, float(sigma) * float(AV_SIGMA_INFLATE))
         return AvPriorResult(
             prior=prior,
             init_av=_init_from_prior(prior),
             map_used=map_name,
             prior_kind="informative_3d",
             a_v_med=med,
-            sigma=sigma,
+            sigma=float(sigma) * float(AV_SIGMA_INFLATE),
             distance_pc=d_pc,
             notes=f"3D dust prior from {map_name}",
-            extra={"l_deg": l_deg, "b_deg": b_deg},
+            extra={"l_deg": l_deg, "b_deg": b_deg, "sigma_raw": float(sigma)},
         )
 
     if in_chen_footprint(l_deg, b_deg):

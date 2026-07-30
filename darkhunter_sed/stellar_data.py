@@ -928,11 +928,11 @@ def query_gaia_stellar_priors(gaia_id: int | str) -> dict:
     if math.isfinite(dec):
         out["Dec"] = dec
 
-    if math.isnan(out["Teff"]):
-        out["Teff"] = 5500.0
-    if math.isnan(out["log(g)"]):
-        out["log(g)"] = 0.0
-    if math.isnan(out["[Fe/H]"]):
-        out["[Fe/H]"] = 0.0
+    # Leave Teff / log(g) / [Fe/H] as NaN when Gaia has no GSP-Phot; caller applies
+    # solar in-memory defaults. Do not invent values here so disk patch can skip NaNs.
+    if math.isfinite(mass_flame) and mass_flame > 0.0:
+        out["Mass_FLAME"] = float(mass_flame)
+    if math.isfinite(age_flame) and age_flame > 0.0:
+        out["Age_FLAME"] = float(age_flame)
 
     return out

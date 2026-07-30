@@ -42,7 +42,7 @@ pip install -e ~/stellar/uberMS ~/stellar/ThePayne ~/stellar/MISTy
    python -m darkhunter_sed.cli <gaia_id> --from-spec-root
    ```
 
-   Per-epoch `vrad_i` uses **normal priors** from RV `[PIPELINE RESULTS]` (errors inflated 2× by default, floor 2 km/s). Gaia priors read from summary unless `--force-redownload`.
+   Per-epoch `vrad_i` uses **normal priors** from RV `[PIPELINE RESULTS]` (errors inflated 2× by default, floor 2 km/s). Gaia priors read from summary; TAP auto-requery when Teff/logg/MH are NaN (or `--force-redownload`). Finite TAP values are written back to the summary; solar defaults are in-memory only. UMS mass prior extends to 3 M☉ and EEP to `[1,808]`; UTP Teff to `[3500,15000]` K; parallax error and Av σ inflated 2×.
 
 5. **Spectrum prep** uses dark-hunter_rv **sinc² blaze** (`sinc_blaze_only`: calibrated blaze + iterative S/N continuum mask, median-scaled; no modpoly pc in UMS), coalesced to 5150–5300 Å for uberMS. Stored per-order blaze from the picker overrides the calibrated shape when regions JSON is present. Set `DARKHUNTER_BLAZE_CALIBRATION` to the rebuilt `blaze_orders_apf.json` (see `scripts/run_local.sh`).
 

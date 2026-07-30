@@ -314,14 +314,17 @@ def build_ums_indict(
     )
 
     indict["initpars"] = initpars
+    # Keep init inside prior support for NumPyro init_to_value.
+    initpars["EEP"] = float(np.clip(float(initpars["EEP"]), 1.0, 808.0))
+    initpars["initial_Mass"] = float(np.clip(float(initpars["initial_Mass"]), 0.3, 3.0))
     indict["priors"] = {
-        "EEP": ["uniform", [250, 500]],
-        "initial_Mass": ["IMF", {"mass_le": 0.3, "mass_ue": 1.25}],
+        "EEP": ["uniform", [1, 808]],
+        "initial_Mass": ["IMF", {"mass_le": 0.3, "mass_ue": 3.0}],
         "initial_[Fe/H]": ["uniform", [-1.6, 0.5]],
         "initial_[a/Fe]": ["fixed", fit_data["[a/Fe]"]],
         "vstar": ["fixed", 8.0] if fix_vstar else ["uniform", [0.0, 25.0]],
         "vmic": ["fixed", 1.0],
-        "Av": ["tnormal", [0.0, 0.1, 0.0, 0.5]],
+        "Av": ["tnormal", [0.0, 0.2, 0.0, 1.0]],
         "dist": dist_prior,
         "photjitter": ["fixed", 0.0] if fix_photjitter else ["uniform", [1e-6, photjitter_max]],
     }
@@ -539,7 +542,7 @@ def run_utp(
         indict["omit_parallax_likelihood"] = True
 
     initpars = {
-        "Teff": fit_data["Teff"],
+        "Teff": float(np.clip(float(fit_data["Teff"]), 3500.0, 15000.0)),
         "[Fe/H]": fit_data["[Fe/H]"],
         "[a/Fe]": fit_data["[a/Fe]"],
         "log(g)": fit_data["log(g)"],
@@ -561,14 +564,14 @@ def run_utp(
 
     indict["initpars"] = initpars
     indict["priors"] = {
-        "Teff": ["uniform", [5500.0, 7000.0]],
+        "Teff": ["uniform", [3500.0, 15000.0]],
         "log(g)": ["uniform", [2.0, 5.5]],
         "[Fe/H]": ["uniform", [-1.5, 0.5]],
         "[a/Fe]": ["uniform", [-0.9, 0.6]],
         "log(R)": ["uniform", [-1, 1]],
         "vstar": ["uniform", [0.0, 25.0]],
         "vmic": ["uniform", [0.5, 3.0]],
-        "Av": ["tnormal", [0.0, 0.01, 0.0, 0.5]],
+        "Av": ["tnormal", [0.0, 0.02, 0.0, 1.0]],
         "dist": dist_prior,
         "photjitter": ["fixed", 0.0],
     }
