@@ -742,7 +742,8 @@ def _query_gaia_stellar_priors_fallback(gaia_id: int | str, *, sync_url: str) ->
     ``CASE`` in their ADQL translator, so coalescing is done in Python.
 
     Atmosphere labels prefer ``gaia_source`` GSP-Phot, then ``astrophysical_parameters``
-    GSP-Phot (some sources have AP filled when ``gaia_source`` columns are NULL).
+    GSP-Phot, then MSC primary (``teff_msc1`` / ``logg_msc1`` / ``mh_msc``) when GSP-Phot
+    is NULL (common for sources where the archive UI shows MSC instead).
     """
     gid = int(gaia_id)
     gs = _tap_sync_votable_table(
@@ -772,6 +773,9 @@ def _query_gaia_stellar_priors_fallback(gaia_id: int | str, *, sync_url: str) ->
             teff_gspphot,
             logg_gspphot,
             mh_gspphot,
+            teff_msc1,
+            logg_msc1,
+            mh_msc,
             mass_flame,
             age_flame,
             flags_flame
@@ -785,9 +789,13 @@ def _query_gaia_stellar_priors_fallback(gaia_id: int | str, *, sync_url: str) ->
             return None
         return ap[name][0]
 
-    teff = _coalesce_float(gs["teff_gspphot"][0], _ap_col("teff_gspphot"))
-    logg = _coalesce_float(gs["logg_gspphot"][0], _ap_col("logg_gspphot"))
-    mh = _coalesce_float(gs["mh_gspphot"][0], _ap_col("mh_gspphot"))
+    teff = _coalesce_float(
+        gs["teff_gspphot"][0], _ap_col("teff_gspphot"), _ap_col("teff_msc1")
+    )
+    logg = _coalesce_float(
+        gs["logg_gspphot"][0], _ap_col("logg_gspphot"), _ap_col("logg_msc1")
+    )
+    mh = _coalesce_float(gs["mh_gspphot"][0], _ap_col("mh_gspphot"), _ap_col("mh_msc"))
     ra = _float_field(gs["ra"][0])
     dec = _float_field(gs["dec"][0])
     g_plx = _float_field(gs["parallax"][0])
@@ -850,9 +858,11 @@ def query_gaia_stellar_priors(gaia_id: int | str) -> dict:
     Parallax is taken in fixed priority order **nss_two_body_orbit →
     nss_acceleration_astro → gaia_source** (ESAC: ``COALESCE`` in one ADQL job).
 
-    Atmosphere labels (Teff, log g, [M/H]) prefer ``gaia_source`` GSP-Phot columns, then
-    the same fields on ``gaiadr3.astrophysical_parameters`` when ``gaia_source`` is NULL.
-    FLAME mass/age/flags come from ``astrophysical_parameters``.
+    Atmosphere labels (Teff, log g, [M/H]) prefer ``gaia_source`` GSP-Phot, then
+    ``astrophysical_parameters`` GSP-Phot, then MSC primary
+    (``teff_msc1`` / ``logg_msc1`` / ``mh_msc``) when GSP-Phot is NULL. MSC assumes an
+    unresolved binary; we use the brighter primary only. FLAME mass/age/flags come from
+    ``astrophysical_parameters``.
 
     If the ESAC TAP service fails (HTTP 400, unknown table on a degraded cluster, etc.),
     and ``STELLAR_GAIA_TAP_FALLBACK`` is not disabled, this function retries using an
@@ -867,9 +877,9 @@ def query_gaia_stellar_priors(gaia_id: int | str) -> dict:
     # ``SELECT``, which breaks multiline ADQL on the Gaia archive (unknown table/columns).
     query = f"""
         SELECT TOP 10
-            COALESCE(gs.teff_gspphot, ap.teff_gspphot) AS teff_gspphot,
-            COALESCE(gs.logg_gspphot, ap.logg_gspphot) AS logg_gspphot,
-            COALESCE(gs.mh_gspphot, ap.mh_gspphot) AS mh_gspphot,
+            COALESCE(gs.teff_gspphot, ap.teff_gspphot, ap.teff_msc1) AS teff_gspphot,
+            COALESCE(gs.logg_gspphot, ap.logg_gspphot, ap.logg_msc1) AS logg_gspphot,
+            COALESCE(gs.mh_gspphot, ap.mh_gspphot, ap.mh_msc) AS mh_gspphot,
             gs.ra,
             gs.dec,
             ap.mass_flame,
@@ -980,7 +990,7 @@ def query_gaia_stellar_priors(gaia_id: int | str) -> dict:
     if math.isfinite(dec):
         out["Dec"] = dec
 
-    # Leave Teff / log(g) / [Fe/H] as NaN when Gaia has no GSP-Phot; caller applies
+    # Leave Teff / log(g) / [Fe/H] as NaN when Gaia has no GSP-Phot/MSC; caller applies
     # solar in-memory defaults. Do not invent values here so disk patch can skip NaNs.
     if math.isfinite(mass_flame) and mass_flame > 0.0:
         out["Mass_FLAME"] = float(mass_flame)
