@@ -668,7 +668,19 @@ def load_photometry_fits(gaia_id, data_dir: str | os.PathLike | None = None) -> 
 def _float_field(val) -> float:
     if np.ma.is_masked(val):
         return float("nan")
-    return float(val)
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return float("nan")
+
+
+def _coalesce_float(*vals) -> float:
+    """First finite float among Gaia TAP fields (masked/None/NaN skipped)."""
+    for val in vals:
+        x = _float_field(val)
+        if math.isfinite(x):
+            return x
+    return float("nan")
 
 
 def _gaia_fallback_tap_enabled() -> bool:
@@ -728,6 +740,9 @@ def _query_gaia_stellar_priors_fallback(gaia_id: int | str, *, sync_url: str) ->
     Same coalesce order as the ESAC query (NSS 2-body → NSS acceleration → ``gaia_source``),
     using several simple ADQL statements. Mirrors such as Gaia@AIP often lack ``COALESCE`` /
     ``CASE`` in their ADQL translator, so coalescing is done in Python.
+
+    Atmosphere labels prefer ``gaia_source`` GSP-Phot, then ``astrophysical_parameters``
+    GSP-Phot (some sources have AP filled when ``gaia_source`` columns are NULL).
     """
     gid = int(gaia_id)
     gs = _tap_sync_votable_table(
@@ -750,13 +765,36 @@ def _query_gaia_stellar_priors_fallback(gaia_id: int | str, *, sync_url: str) ->
             f"Fallback TAP returned no row in gaiadr3.gaia_source for source_id {gaia_id}."
         )
 
-    teff = gs["teff_gspphot"][0]
-    logg = gs["logg_gspphot"][0]
-    mh = gs["mh_gspphot"][0]
+    ap = _tap_sync_votable_table(
+        sync_url,
+        f"""
+        SELECT TOP 10
+            teff_gspphot,
+            logg_gspphot,
+            mh_gspphot,
+            mass_flame,
+            age_flame,
+            flags_flame
+        FROM gaiadr3.astrophysical_parameters
+        WHERE source_id = {gid}
+        """,
+    )
+
+    def _ap_col(name: str):
+        if ap is None or len(ap) == 0 or name not in ap.colnames:
+            return None
+        return ap[name][0]
+
+    teff = _coalesce_float(gs["teff_gspphot"][0], _ap_col("teff_gspphot"))
+    logg = _coalesce_float(gs["logg_gspphot"][0], _ap_col("logg_gspphot"))
+    mh = _coalesce_float(gs["mh_gspphot"][0], _ap_col("mh_gspphot"))
     ra = _float_field(gs["ra"][0])
     dec = _float_field(gs["dec"][0])
     g_plx = _float_field(gs["parallax"][0])
     g_err = _float_field(gs["parallax_error"][0])
+    mass_flame = _float_field(_ap_col("mass_flame"))
+    age_flame = _float_field(_ap_col("age_flame"))
+    flags_flame = _ap_col("flags_flame")
 
     nss2 = _tap_sync_votable_table(
         sync_url,
@@ -781,14 +819,24 @@ def _query_gaia_stellar_priors_fallback(gaia_id: int | str, *, sync_url: str) ->
         pair = (g_plx, g_err)
 
     final_plx, final_err = pair
+    if flags_flame is None or (isinstance(flags_flame, float) and math.isnan(flags_flame)):
+        flags_s = ""
+    else:
+        flags_s = str(flags_flame).strip()
+        if flags_s.lower() in ("none", "nan", "--"):
+            flags_s = ""
+
     return Table(
-        rows=[[teff, logg, mh, ra, dec, final_plx, final_err]],
+        rows=[[teff, logg, mh, ra, dec, mass_flame, age_flame, flags_s, final_plx, final_err]],
         names=[
             "teff_gspphot",
             "logg_gspphot",
             "mh_gspphot",
             "ra",
             "dec",
+            "mass_flame",
+            "age_flame",
+            "flags_flame",
             "final_parallax",
             "final_parallax_error",
         ],
@@ -801,6 +849,10 @@ def query_gaia_stellar_priors(gaia_id: int | str) -> dict:
 
     Parallax is taken in fixed priority order **nss_two_body_orbit →
     nss_acceleration_astro → gaia_source** (ESAC: ``COALESCE`` in one ADQL job).
+
+    Atmosphere labels (Teff, log g, [M/H]) prefer ``gaia_source`` GSP-Phot columns, then
+    the same fields on ``gaiadr3.astrophysical_parameters`` when ``gaia_source`` is NULL.
+    FLAME mass/age/flags come from ``astrophysical_parameters``.
 
     If the ESAC TAP service fails (HTTP 400, unknown table on a degraded cluster, etc.),
     and ``STELLAR_GAIA_TAP_FALLBACK`` is not disabled, this function retries using an
@@ -815,9 +867,9 @@ def query_gaia_stellar_priors(gaia_id: int | str) -> dict:
     # ``SELECT``, which breaks multiline ADQL on the Gaia archive (unknown table/columns).
     query = f"""
         SELECT TOP 10
-            gs.teff_gspphot,
-            gs.logg_gspphot,
-            gs.mh_gspphot,
+            COALESCE(gs.teff_gspphot, ap.teff_gspphot) AS teff_gspphot,
+            COALESCE(gs.logg_gspphot, ap.logg_gspphot) AS logg_gspphot,
+            COALESCE(gs.mh_gspphot, ap.mh_gspphot) AS mh_gspphot,
             gs.ra,
             gs.dec,
             ap.mass_flame,
@@ -902,7 +954,7 @@ def query_gaia_stellar_priors(gaia_id: int | str) -> dict:
         out["Age_Gyr"] = float(age_flame)
     if "flags_flame" in result.colnames:
         flag = result["flags_flame"][0]
-        if flag is not None and str(flag).strip() not in ("", "None"):
+        if flag is not None and str(flag).strip() not in ("", "None", "nan"):
             out["Flags_FLAME"] = str(flag).strip()
 
     plx = _float_field(result["final_parallax"][0])
