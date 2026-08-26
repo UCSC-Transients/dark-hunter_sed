@@ -87,6 +87,94 @@ def _ps1_archive_mag_pair(mag, err, default_err=0.05):
     return (m, e)
 
 
+def _append_wise_from_irsa(position, photometry, radius):
+    """AllWISE W1/W2 via IRSA (AllWISE p3as PSD)."""
+    Irsa.ROW_LIMIT = 1
+    wise_data = Irsa.query_region(position, catalog="allwise_p3as_psd", radius=radius)
+    if len(wise_data) == 0:
+        return 0
+    bands = (
+        ("WISE_W1", "w1mpro", "w1sigmpro"),
+        ("WISE_W2", "w2mpro", "w2sigmpro"),
+    )
+    n = 0
+    for out_name, c_mag, c_err in bands:
+        if c_mag not in wise_data.colnames or c_err not in wise_data.colnames:
+            continue
+        mag = wise_data[c_mag][0]
+        err = wise_data[c_err][0]
+        if good_number_checker(mag) and good_number_checker(err):
+            photometry.append((out_name, float(mag), float(err)))
+            n += 1
+    return n
+
+
+def _decam_u_from_gaia_archive(source_id: str) -> tuple[float, float] | None:
+    """
+    SkyMapper DR2 u-band (DECam u filter) via Gaia archive cross-match.
+
+    Uses ``gaiadr3.skymapperdr2_best_neighbour`` + ``gaiadr3.skymapperdr2_join``.
+    Returns (mag, err) or None when no usable row is found.
+    """
+    try:
+        job = Gaia.launch_job(
+            f"""
+            SELECT TOP 1 sm.u_psf, sm.e_u_psf
+            FROM gaiadr3.skymapperdr2_best_neighbour AS nb
+            INNER JOIN gaiadr3.skymapperdr2_join AS sm
+                ON nb.original_ext_source_id = sm.skymapperdr2_oid
+            WHERE nb.source_id = {source_id}
+            """
+        )
+        rows = job.get_results()
+    except Exception as exc:
+        logger.debug("DECam-u Gaia archive query failed for %s: %s", source_id, exc)
+        return None
+    if len(rows) == 0:
+        return None
+    row = rows[0]
+    mag = _gaia_scalar(row, "u_psf")
+    err = _gaia_scalar(row, "e_u_psf")
+    if not (math.isfinite(mag) and math.isfinite(err) and err > 0):
+        return None
+    return (mag, err)
+
+
+def _append_decam_u_vizier(position, photometry, radius) -> int:
+    """Vizier SkyMapper DR2 fallback for DECam u when Gaia archive join is missing."""
+    Vizier.ROW_LIMIT = 1
+    catalog = "II/358/dr2"
+    try:
+        data = Vizier.query_region(position, catalog=catalog, radius=radius)
+    except Exception as exc:
+        logger.debug("DECam-u Vizier query failed: %s", exc)
+        return 0
+    if data is None or catalog not in data.keys():
+        return 0
+    table = data[catalog]
+    if len(table) == 0:
+        return 0
+    row = table[0]
+    mag_keys = ("uPSF", "u_psf", "umag", "u_mag")
+    err_keys = ("e_uPSF", "e_u_psf", "e_umag", "duPSF", "du_psf")
+    mag = None
+    err = None
+    for key in mag_keys:
+        if key in row.colnames:
+            mag = _gaia_scalar(row, key)
+            if math.isfinite(mag):
+                break
+    for key in err_keys:
+        if key in row.colnames:
+            err = _gaia_scalar(row, key)
+            if math.isfinite(err):
+                break
+    if not (good_number_checker(mag) and good_number_checker(err)):
+        return 0
+    photometry.append(("DECam_u", float(mag), float(err)))
+    return 1
+
+
 def _append_ps1_from_gaia_archive(row, photometry):
     """
     Prefer PS1 mean PSF AB mags from ``gaiadr2.panstarrs1_original_valid`` via
@@ -154,12 +242,18 @@ def skycoord_ps1_cone_search(row, target_epoch_jyear=PS1_VIZIER_DEFAULT_EPOCH_JY
 
 def query_catalogs(source_id, radius=3, ps1_vizier_epoch_jyear=PS1_VIZIER_DEFAULT_EPOCH_JY):
     """
-    Cross-match photometry: Gaia DR3 G/BP/RP, external catalogs, and Pan-STARRS.
+    Cross-match photometry: Gaia DR3 G/BP/RP, external catalogs, Pan-STARRS, WISE, and DECam-u.
 
     Pan-STARRS: when ``gaiadr3.panstarrs1_best_neighbour`` joins to
     ``gaiadr2.panstarrs1_original_valid``, use archive PSF AB mags from that row.
     Otherwise query Vizier II/349 at the Gaia position propagated from
     ``ref_epoch`` to ``ps1_vizier_epoch_jyear`` (default ~2011, PS1-era).
+
+    WISE: AllWISE W1/W2 via IRSA ``allwise_p3as_psd``.
+
+    DECam-u: SkyMapper DR2 u-band (DECam filter) via Gaia
+    ``skymapperdr2_best_neighbour`` + ``skymapperdr2_join``, with Vizier II/358/dr2
+    cone fallback.
     """
     if ps1_vizier_epoch_jyear is None:
         ps1_vizier_epoch_jyear = PS1_VIZIER_DEFAULT_EPOCH_JY
@@ -249,10 +343,21 @@ def query_catalogs(source_id, radius=3, ps1_vizier_epoch_jyear=PS1_VIZIER_DEFAUL
         if good_number_checker(km) and good_number_checker(kme):
             photometry.append(("2MASS_Ks", float(km), float(kme)))
 
-    wise_data = Irsa.query_region(position, catalog="allwise_p3as_psd", radius=radius)
-    if len(wise_data) > 0:
-        photometry.append(("WISE_W1", wise_data["w1mpro"][0], wise_data["w1sigmpro"][0]))
-        photometry.append(("WISE_W2", wise_data["w2mpro"][0], wise_data["w2sigmpro"][0]))
+    _append_wise_from_irsa(position, photometry, radius)
+
+    decam_pair = _decam_u_from_gaia_archive(str(source_id))
+    if decam_pair is not None:
+        photometry.append(("DECam_u", decam_pair[0], decam_pair[1]))
+        print(
+            "DECam-u: from Gaia archive "
+            "(gaiadr3.skymapperdr2_best_neighbour + skymapperdr2_join)."
+        )
+    else:
+        decam_n = _append_decam_u_vizier(position, photometry, radius)
+        if decam_n:
+            print("DECam-u: from Vizier II/358/dr2 cone search.")
+        else:
+            print("DECam-u: no archive join row and Vizier fallback returned no match.")
 
     sdss_data = SDSS.query_crossid(
         position,

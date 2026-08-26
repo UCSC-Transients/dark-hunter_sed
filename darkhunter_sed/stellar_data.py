@@ -95,6 +95,7 @@ PREFERRED_BAND_ORDER = [
     "2MASS_Ks",
     "WISE_W1",
     "WISE_W2",
+    "DECam_u",
     "SDSS_u",
     "SDSS_g",
     "SDSS_r",
