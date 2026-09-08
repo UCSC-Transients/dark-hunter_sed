@@ -15,6 +15,7 @@ Batch spectrophotometric fitting with uberMS. **Run the RV pipeline first** so
 | `SPEC_ROOT` | `/Users/rfoley/darkhunter/rvs/data` |
 | `DARKHUNTER_OUTPUT_DIR` | `/Users/rfoley/darkhunter/rvs/output` |
 | `PYSYN_CDBS` | `/Users/rfoley/pysynphot/trds` (synphot CDBS; PS1/Swift → `comp/nonhst/`) |
+| `PHOENIX_DIR` | `/Users/rfoley/phoenix/HiResFITS` (PHOENIX ACES HiRes; Path-2) |
 
 ```bash
 export SED_REPO=/Users/rfoley/darkhunter/seds/dark-hunter_sed
@@ -26,6 +27,7 @@ export DARKHUNTER_OUTPUT_DIR=/Users/rfoley/darkhunter/rvs/output
 export DARKHUNTER_SED_OUTPUT_DIR=$SED_REPO/output
 export DARKHUNTER_SED_PHOTOMETRY_DIR=$SED_REPO/output/photometry
 export PYSYN_CDBS=/Users/rfoley/pysynphot/trds
+export PHOENIX_DIR=/Users/rfoley/phoenix/HiResFITS
 export PYTHONPATH=$RV_REPO:$SED_REPO
 ```
 
@@ -37,6 +39,10 @@ Convert repo ASCII filter curves and install into the nonhst CDBS layout (band n
 $PY -m darkhunter_sed.filters_synphot
 # FITS also under $SED_REPO/data/thruputs/; Swift catalog gather still not implemented
 ```
+
+### Path-2 PHOENIX + F99 (R_V=3.1)
+
+`darkhunter_sed.phoenix_grid.PhoenixGrid` indexes `$PHOENIX_DIR` and interpolates Teff / logg / [Fe/H] / [α/Fe] when Alpha dirs exist. `darkhunter_sed.extinction_f99` reddens with `dust_extinction` Fitzpatrick99 (`F99.extinguish`, R_V=3.1) before synphot AB/Vega magnitudes. Unit tests use a mocked tiny wavelength grid (no full HiRes tree in CI).
 
 Use MacPorts Python for dust Av priors (default anaconda `python3` may lack dustmaps):
 

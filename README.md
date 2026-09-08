@@ -65,6 +65,7 @@ pip install -e ~/stellar/uberMS ~/stellar/ThePayne ~/stellar/MISTy
 | `DARKHUNTER_BLAZE_CALIBRATION` | Per-order sinc² blaze JSON (default: dark-hunter_rv `calibration/blaze_orders_apf.json`) |
 | `DARKHUNTER_SED_MASKS_DIR` | Picker regions JSON directory (default: `output/masks/`) |
 | `PYSYN_CDBS` | synphot/pysynphot CDBS root (typical: `/Users/rfoley/pysynphot/trds`); Path-2 PS1/Swift thruputs install to `$PYSYN_CDBS/grp/redcat/trds/comp/nonhst/` |
+| `PHOENIX_DIR` | PHOENIX ACES HiResFITS root (default: `/Users/rfoley/phoenix/HiResFITS`); Path-2 forward photometry |
 
 ### Path-2 filter thruputs (PS1 / Swift)
 
@@ -77,6 +78,14 @@ python -m darkhunter_sed.filters_synphot          # convert + install into nonhs
 ```
 
 Swift **catalog gather** is not implemented yet (filters/registry only).
+
+### Path-2 PHOENIX + F99
+
+Forward photometry loads HiRes spectra from `$PHOENIX_DIR` (Teff, logg, [Fe/H], and [α/Fe] when Alpha-tagged directories exist), applies Fitzpatrick (1999) extinction at **R_V=3.1** via `dust_extinction.F99.extinguish`, then synthesizes AB/Vega mags with synphot registry bandpasses (`darkhunter_sed.phoenix_grid`, `darkhunter_sed.extinction_f99`).
+
+```bash
+export PHOENIX_DIR=/Users/rfoley/phoenix/HiResFITS
+```
 
 ## Outputs
 
