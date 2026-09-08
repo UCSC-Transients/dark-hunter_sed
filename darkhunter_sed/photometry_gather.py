@@ -6,7 +6,6 @@ import warnings
 from pathlib import Path
 
 import numpy as np
-from astropy.io import fits
 from astropy.time import Time
 from astroquery.gaia import Gaia
 
@@ -438,21 +437,46 @@ def query_catalogs(source_id, radius=3, ps1_vizier_epoch_jyear=PS1_VIZIER_DEFAUL
                 photometry.append(("PS_y", ps1_table["ymag"][0], ps1_table["e_ymag"][0]))
 
     print(photometry)
+    # Swift UVOT: future Path-2 gather will append pointed UVOT detections / 3σ ULs
+    # (flag=1) here. No Swift MAST/HEASARC query in this module yet — stub only.
     return photometry
 
 
 def save_photometry_to_fits(source_id, photometry, outdir=None):
-    # Wider string column for band names (e.g. GaiaDR3_BP, GALEX_NUV)
-    data = np.array(photometry, dtype=[("band", "S32"), ("mag", "d"), ("err", "d")])
+    """
+    Write ``{source_id}_phot.fits`` with columns ``band``, ``mag``, ``err``, ``flag``.
 
-    hdu_primary = fits.PrimaryHDU()
-    hdu_table = fits.BinTableHDU.from_columns(
-        [
-            fits.Column(name="band", format="32A", array=data["band"]),
-            fits.Column(name="mag", format="D", array=data["mag"]),
-            fits.Column(name="err", format="D", array=data["err"]),
-        ]
-    )
+    Parameters
+    ----------
+    source_id :
+        Gaia DR3 source_id used in the filename.
+    photometry :
+        Sequence of ``(band, mag, err)`` or ``(band, mag, err, flag)``. Catalog gather
+        emits detections only; missing flag defaults to ``0``.
+    outdir :
+        Output directory; created if needed. ``None`` writes into the CWD.
+
+    Returns
+    -------
+    Path
+        Path to the written FITS file.
+
+    Notes
+    -----
+    Swift UVOT (and similar pointed UV photometry / upper limits) will be added in a
+    later Path-2 gather pass; **do not** query Swift here — comment stub only.
+    """
+    # Swift UVOT: pointed UVOT photometry / 3σ ULs will be appended later (no query yet).
+    from darkhunter_sed.phot_sed_io import FLAG_DETECTION, write_photometry_fits
+
+    rows = []
+    for item in photometry:
+        if len(item) == 3:
+            band, mag, err = item
+            rows.append((str(band), float(mag), float(err), FLAG_DETECTION))
+        else:
+            band, mag, err, flag = item
+            rows.append((str(band), float(mag), float(err), int(flag)))
 
     if outdir:
         os.makedirs(outdir, exist_ok=True)
@@ -460,9 +484,9 @@ def save_photometry_to_fits(source_id, photometry, outdir=None):
     else:
         output_filename = f"{source_id}_phot.fits"
 
-    fits.HDUList([hdu_primary, hdu_table]).writeto(output_filename, overwrite=True)
-    print(f"Saved: {output_filename}")
-    return Path(output_filename)
+    path = write_photometry_fits(output_filename, rows, overwrite=True)
+    print(f"Saved: {path}")
+    return path
 
 
 def gather_photometry_for_star(

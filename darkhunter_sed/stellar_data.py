@@ -375,11 +375,37 @@ def photometry_fits_path(gaia_id, data_dir: str | os.PathLike | None = None) -> 
 
 def build_phot_dict_from_table(phottab: Table) -> tuple[dict, list]:
     """
-    Build phot dict and ordered phot_filtarr from FITS table rows (band, mag, err).
-    Skips invalid mags/errors; first row wins for duplicate band keys after aliasing.
+    Build Path-1 phot dict and ordered ``phot_filtarr`` from FITS table rows.
+
+    Parameters
+    ----------
+    phottab :
+        Astropy table with ``band``, ``mag``, ``err``, and optional ``flag``.
+        Missing ``flag`` is treated as ``0`` (detection) for backward compatibility.
+        Rows with ``flag != 0`` (3σ upper limits) are excluded from the detection dict.
+
+    Returns
+    -------
+    phot, phot_filtarr
+        ``{band: [mag, err]}`` for detections only; preferred band order plus extras.
+        Skips invalid mags/errors; first row wins for duplicate band keys after aliasing.
+
+    Limits
+    ------
+    Path-2 UL likelihoods use :mod:`darkhunter_sed.phot_sed_io`, not this dict.
     """
+    from darkhunter_sed.phot_sed_io import FLAG_DETECTION
+
+    has_flag = "flag" in phottab.colnames
     phot: dict = {}
     for row in phottab:
+        if has_flag:
+            try:
+                flag_i = int(row["flag"])
+            except (TypeError, ValueError):
+                flag_i = FLAG_DETECTION
+            if flag_i != FLAG_DETECTION:
+                continue
         pb = standardize_band_name(row["band"])
         mag = float(row["mag"])
         err = float(row["err"])
