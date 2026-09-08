@@ -14,6 +14,7 @@ Batch spectrophotometric fitting with uberMS. **Run the RV pipeline first** so
 | `DARKHUNTER_SED_MODELS_DIR` | `$STELLAR_ROOT/gaia/models` |
 | `SPEC_ROOT` | `/Users/rfoley/darkhunter/rvs/data` |
 | `DARKHUNTER_OUTPUT_DIR` | `/Users/rfoley/darkhunter/rvs/output` |
+| `PYSYN_CDBS` | `/Users/rfoley/pysynphot/trds` (synphot CDBS; PS1/Swift → `comp/nonhst/`) |
 
 ```bash
 export SED_REPO=/Users/rfoley/darkhunter/seds/dark-hunter_sed
@@ -24,7 +25,17 @@ export SPEC_ROOT=/Users/rfoley/darkhunter/rvs/data
 export DARKHUNTER_OUTPUT_DIR=/Users/rfoley/darkhunter/rvs/output
 export DARKHUNTER_SED_OUTPUT_DIR=$SED_REPO/output
 export DARKHUNTER_SED_PHOTOMETRY_DIR=$SED_REPO/output/photometry
+export PYSYN_CDBS=/Users/rfoley/pysynphot/trds
 export PYTHONPATH=$RV_REPO:$SED_REPO
+```
+
+### Path-2 synphot thruputs (PS1 / Swift)
+
+Convert repo ASCII filter curves and install into the nonhst CDBS layout (band names = `*_phot.fits` stems `PS_*` / `Swift_*`):
+
+```bash
+$PY -m darkhunter_sed.filters_synphot
+# FITS also under $SED_REPO/data/thruputs/; Swift catalog gather still not implemented
 ```
 
 Use MacPorts Python for dust Av priors (default anaconda `python3` may lack dustmaps):

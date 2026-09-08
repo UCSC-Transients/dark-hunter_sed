@@ -11,6 +11,7 @@ samples/
 plots/
 *.fits
 !tests/fixtures/*.fits
+!data/thruputs/*.fits
 
 # Models (large; not in git)
 models/
