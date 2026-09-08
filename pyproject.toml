@@ -15,6 +15,7 @@ dependencies = [
   "astropy>=6.0",
   "requests>=2.31",
   "astroquery>=0.4",
+  "synphot>=1.4",
 ]
 
 [project.optional-dependencies]
@@ -28,6 +29,7 @@ darkhunter-sed-convert = "darkhunter_sed.convert_spectra:main"
 darkhunter-sed-gather-phot = "darkhunter_sed.photometry_gather:main"
 darkhunter-sed-batch = "darkhunter_sed.batch:main"
 darkhunter-sed-push-m1 = "darkhunter_sed.push_m1:main"
+darkhunter-sed-filters = "darkhunter_sed.filters_synphot:_cli"
 
 [tool.setuptools.packages.find]
 where = ["."]

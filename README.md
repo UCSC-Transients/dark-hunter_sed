@@ -64,6 +64,19 @@ pip install -e ~/stellar/uberMS ~/stellar/ThePayne ~/stellar/MISTy
 | `DARKHUNTER_SED_MODELS_DIR` | NN weights override |
 | `DARKHUNTER_BLAZE_CALIBRATION` | Per-order sinc² blaze JSON (default: dark-hunter_rv `calibration/blaze_orders_apf.json`) |
 | `DARKHUNTER_SED_MASKS_DIR` | Picker regions JSON directory (default: `output/masks/`) |
+| `PYSYN_CDBS` | synphot/pysynphot CDBS root (typical: `/Users/rfoley/pysynphot/trds`); Path-2 PS1/Swift thruputs install to `$PYSYN_CDBS/grp/redcat/trds/comp/nonhst/` |
+
+### Path-2 filter thruputs (PS1 / Swift)
+
+ASCII curves in `data/PAN-STARRS_PS1.*.dat` and `data/Swift_UVOT.*_trn.dat` convert to synphot FITS under `data/thruputs/`. Band names match `*_phot.fits` (`PS_*`, `Swift_*`):
+
+```bash
+export PYSYN_CDBS=/Users/rfoley/pysynphot/trds   # or your CDBS trds root
+python -m darkhunter_sed.filters_synphot          # convert + install into nonhst/
+# or: python -m darkhunter_sed.filters_synphot --convert-only
+```
+
+Swift **catalog gather** is not implemented yet (filters/registry only).
 
 ## Outputs
 
