@@ -80,6 +80,11 @@ def test_registered_bands_api() -> None:
     assert "GaiaDR3_G" in all_bands
     assert "PS_g" in all_bands
     assert "Swift_U" in all_bands
+    assert "WISE_W1" in all_bands
+    assert "WISE_W2" in all_bands
+    # Path-2: W3/W4 excluded (beyond PHOENIX HiRes red end).
+    assert "WISE_W3" not in all_bands
+    assert "WISE_W4" not in all_bands
 
 
 def test_unknown_band_raises() -> None:

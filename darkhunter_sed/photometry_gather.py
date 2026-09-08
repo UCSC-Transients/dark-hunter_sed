@@ -87,7 +87,15 @@ def _ps1_archive_mag_pair(mag, err, default_err=0.05):
 
 
 def _append_wise_from_irsa(position, photometry, radius):
-    """AllWISE W1/W2 via IRSA (AllWISE p3as PSD)."""
+    """
+    AllWISE W1/W2 via IRSA (AllWISE p3as PSD).
+
+    W3/W4 are intentionally not gathered: Path-2 forward photometry uses
+    PHOENIX HiRes, which ends near 5.5 μm and cannot cover W3/W4 thruputs.
+    W1/W2 are kept but their CDBS thruputs still extend redward of PHOENIX
+    (incomplete mid-IR integral / synphot taper) — examine later; may need
+    a PHOENIX or SED red extension before those bands are fully trusted.
+    """
     Irsa.ROW_LIMIT = 1
     wise_data = Irsa.query_region(position, catalog="allwise_p3as_psd", radius=radius)
     if len(wise_data) == 0:
