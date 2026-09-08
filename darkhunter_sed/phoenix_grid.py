@@ -688,6 +688,15 @@ def synthesize_mags(
     Requires ``synphot``. Vega uses :meth:`synphot.SourceSpectrum.from_vega`.
     Bandpasses must overlap the spectrum; zero-thruput or non-overlap raises
     from synphot. Does **not** apply extinction (caller should use F99 first).
+
+    WISE / PHOENIX red cutoff
+    ------------------------
+    PHOENIX ACES HiRes WAVE tops out near 55_000 Å (~5.5 μm). WISE_W1/W2
+    thruputs extend past that edge, so ``Observation(..., force="taper")``
+    logs ``Source spectrum is tapered`` and the mid-IR integral is missing
+    long-λ flux — leave for later examination. WISE_W3/W4 are not in the
+    Path-2 registry. A redward extension of the PHOENIX (or system) SED may
+    be required before WISE mags are trustworthy.
     """
     from synphot import Observation, SourceSpectrum, SpectralElement
     from synphot.models import Empirical1D
@@ -724,6 +733,8 @@ def synthesize_mags(
             bp = load_bandpass(band, cdbs_root=cdbs_root)
         if not isinstance(bp, SpectralElement):
             raise TypeError(f"Bandpass for {band} is not a SpectralElement")
+        # force="taper": allow partial overlap (notably WISE_W1/W2 vs PHOENIX
+        # red end); see docstring note above about missing mid-IR flux.
         obs = Observation(source, bp, force="taper")
         entry: dict[str, float] = {}
         if "ab" in sys_set:

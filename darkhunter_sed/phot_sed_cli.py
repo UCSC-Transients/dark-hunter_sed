@@ -137,6 +137,20 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     rows = read_photometry_fits(phot_path)
+    # Path-2 registry omits WISE_W3/W4 (beyond PHOENIX HiRes); drop if present
+    # in legacy ``*_phot.fits``. W1/W2 kept but still truncated vs PHOENIX —
+    # see filters_synphot / phoenix_grid synthesize_mags notes.
+    from darkhunter_sed.filters_synphot import BAND_REGISTRY
+
+    _skip = {"WISE_W3", "WISE_W4"}
+    rows = [r for r in rows if r.band not in _skip and r.band in BAND_REGISTRY]
+    if not rows:
+        print(
+            f"No Path-2-registered photometry bands in {phot_path}",
+            file=sys.stderr,
+        )
+        return 1
+
     mist_nn = resolve_mist_nn_path(args.mist_nn)
     predictor = load_misty_predictor(mist_nn)
     grid = PhoenixGrid(root=args.phoenix_dir)

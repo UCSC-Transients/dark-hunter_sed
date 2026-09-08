@@ -11,8 +11,11 @@ Limits
 - Wavelengths in source ASCII are assumed to be Angstroms.
 - Negative throughput samples are clamped to 0 (seen in Swift white).
 - Swift UVOT **catalog gather** is out of scope; filters/registry only.
-- Stock CDBS bands (Gaia/GALEX/SDSS/2MASS/WISE) resolve only when
+- Stock CDBS bands (Gaia/GALEX/SDSS/2MASS/WISE W1–W2) resolve only when
   ``PYSYN_CDBS`` points at a tree that already contains those thruputs.
+- **WISE_W3 / WISE_W4 are not registered** for Path-2: PHOENIX HiRes ends
+  near 5.5 μm while W3/W4 thruputs extend to tens of μm (see module comments
+  near the WISE stock entries).
 """
 
 from __future__ import annotations
@@ -102,10 +105,17 @@ def _build_band_registry() -> dict[str, BandSpec]:
         ("2MASS_J", "2mass_j_001_syn.fits", "2MASS J (stock CDBS)"),
         ("2MASS_H", "2mass_h_001_syn.fits", "2MASS H (stock CDBS)"),
         ("2MASS_Ks", "2mass_ks_001_syn.fits", "2MASS Ks (stock CDBS)"),
-        ("WISE_W1", "wise_w1_001_syn.fits", "WISE W1 (stock CDBS)"),
-        ("WISE_W2", "wise_w2_001_syn.fits", "WISE W2 (stock CDBS)"),
-        ("WISE_W3", "wise_w3_001_syn.fits", "WISE W3 (stock CDBS)"),
-        ("WISE_W4", "wise_w4_001_syn.fits", "WISE W4 (stock CDBS)"),
+        # WISE vs PHOENIX HiRes (~500–55_000 Å / ≤~5.5 μm):
+        # - W1/W2 CDBS thruputs extend redward of the PHOENIX WAVE file
+        #   (~65_000 / ~80_000 Å). Kept for Path-2 photometry, but mid-IR
+        #   integrals are incomplete (synphot taper). Later: examine missing
+        #   long-λ flux and possibly build a PHOENIX/SED red extension.
+        # - W3/W4 thruputs go to ~285_000 Å — drop from Path-2 registry until
+        #   such an extension exists (do not synthesize these bands).
+        ("WISE_W1", "wise_w1_001_syn.fits", "WISE W1 (stock CDBS; partial vs PHOENIX)"),
+        ("WISE_W2", "wise_w2_001_syn.fits", "WISE W2 (stock CDBS; partial vs PHOENIX)"),
+        # ("WISE_W3", "wise_w3_001_syn.fits", ...),  # excluded: far beyond PHOENIX
+        # ("WISE_W4", "wise_w4_001_syn.fits", ...),  # excluded: far beyond PHOENIX
     ]
     for band, fname, descrip in stock:
         registry[band] = BandSpec(band, fname, None, descrip)
