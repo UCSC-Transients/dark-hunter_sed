@@ -12,6 +12,38 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 SPECTRUM_ORDER_END_DEV_TOL = 0.04
 SPECTRUM_ORDER_END_MIN_PIXELS = 18
 
+# Path-2 PHOENIX ACES HiRes root (override with env ``PHOENIX_DIR``).
+DEFAULT_PHOENIX_DIR = Path("/Users/rfoley/phoenix/HiResFITS")
+
+
+def phoenix_dir(explicit: Path | str | None = None) -> Path:
+    """
+    Resolve the PHOENIX HiResFITS root directory.
+
+    Parameters
+    ----------
+    explicit :
+        Optional override path. When ``None``, uses ``PHOENIX_DIR`` from the
+        environment, else :data:`DEFAULT_PHOENIX_DIR`.
+
+    Returns
+    -------
+    Path
+        Absolute HiResFITS root (contains ``WAVE_PHOENIX-*.fits`` and the
+        ``PHOENIX-ACES-AGSS-COND-2011/`` grid tree).
+
+    Limits
+    ------
+    Does not verify that the wavelength file or metallicity subdirs exist;
+    callers that need a populated grid should construct :class:`~darkhunter_sed.phoenix_grid.PhoenixGrid`.
+    """
+    if explicit is not None:
+        return Path(explicit).expanduser().resolve()
+    env = os.environ.get("PHOENIX_DIR")
+    if env:
+        return Path(env).expanduser().resolve()
+    return DEFAULT_PHOENIX_DIR.expanduser().resolve()
+
 
 def stellar_root() -> Path:
     """Directory containing uberMS, ThePayne, MISTy (sibling installs)."""
