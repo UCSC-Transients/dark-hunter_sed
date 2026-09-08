@@ -66,6 +66,7 @@ pip install -e ~/stellar/uberMS ~/stellar/ThePayne ~/stellar/MISTy
 | `DARKHUNTER_SED_MASKS_DIR` | Picker regions JSON directory (default: `output/masks/`) |
 | `PYSYN_CDBS` | synphot/pysynphot CDBS root (typical: `/Users/rfoley/pysynphot/trds`); Path-2 PS1/Swift thruputs install to `$PYSYN_CDBS/grp/redcat/trds/comp/nonhst/` |
 | `PHOENIX_DIR` | PHOENIX ACES HiResFITS root (default: `/Users/rfoley/phoenix/HiResFITS`); Path-2 forward photometry |
+| `DARKHUNTER_SED_PHOT_SED_DIR` | Path-2 dynesty outputs (default: `output/phot_sed/`) |
 
 ### Path-2 filter thruputs (PS1 / Swift)
 
@@ -87,6 +88,18 @@ Forward photometry loads HiRes spectra from `$PHOENIX_DIR` (Teff, logg, [Fe/H], 
 export PHOENIX_DIR=/Users/rfoley/phoenix/HiResFITS
 ```
 
+### Path-2 MISTy + 1-star photometry SED
+
+`darkhunter-sed-phot --model 1star` fits `EEP, M, [Fe/H], [α/Fe], Av, ϖ` with **dynesty**, using MISTy (`mistNN` under `STELLAR_ROOT`) → PHOENIX × F99 R_V=3.1 → synphot. Reports **BIC** (max-L) and **lnZ**. Products under `output/phot_sed/`.
+
+```bash
+export STELLAR_ROOT=~/stellar
+export PHOENIX_DIR=/Users/rfoley/phoenix/HiResFITS
+# optional: JAX_PLATFORMS=cpu
+darkhunter-sed-phot <gaia_id> --model 1star
+# or: python -m darkhunter_sed.phot_sed_cli <gaia_id> --model 1star
+```
+
 ## Outputs
 
 | File | Content |
@@ -94,6 +107,8 @@ export PHOENIX_DIR=/Users/rfoley/phoenix/HiResFITS
 | `output/samples/Gaia_DR3_<id>_ums.fits` | UMS posterior (primary; `initial_Mass` → M1) |
 | `output/samples/Gaia_DR3_<id>_utp.fits` | UTP posterior (atmospheric cross-check) |
 | `output/sed_summaries/Gaia_DR3_<id>_sed_summary.json` | Medians, credible intervals, `m1_msun` |
+| `output/phot_sed/Gaia_DR3_<id>_1star_summary.json` | Path-2 1-star BIC, lnZ, max-L params |
+| `output/phot_sed/Gaia_DR3_<id>_1star_samples.npz` | Path-2 1-star dynesty samples |
 
 ## Ziggy commands
 
