@@ -24,7 +24,11 @@ from darkhunter_sed.phot_sed_models import (
     parallax_mas_to_distance_pc,
     predict_1star_phot,
 )
-from darkhunter_sed.phot_sed_cli import _normalize_gaia_id, main as phot_cli_main
+from darkhunter_sed.phot_sed_cli import (
+    _normalize_gaia_id,
+    default_phot_fits_path,
+    main as phot_cli_main,
+)
 
 
 def _mock_mist_predictor(**kwargs):
@@ -217,7 +221,24 @@ def test_cli_normalize_and_help() -> None:
     assert exc.value.code == 0
 
 
-def test_cli_missing_phot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_default_phot_fits_path_matches_gather(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Default lookup is ``{id}_phot.fits``, not ``Gaia_DR3_{id}_phot.fits``."""
+    monkeypatch.setenv("DARKHUNTER_SED_PHOTOMETRY_DIR", str(tmp_path))
+    path = default_phot_fits_path("77413727493690112")
+    assert path == (tmp_path / "77413727493690112_phot.fits").resolve()
+    assert "Gaia_DR3_" not in path.name
+    # Explicit dir override
+    other = tmp_path / "other"
+    other.mkdir()
+    assert default_phot_fits_path("99", other) == (other / "99_phot.fits").resolve()
+
+
+def test_cli_missing_phot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys) -> None:
     monkeypatch.setenv("DARKHUNTER_SED_PHOTOMETRY_DIR", str(tmp_path))
     rc = phot_cli_main(["12345", "--model", "1star"])
     assert rc == 1
+    err = capsys.readouterr().err
+    assert "12345_phot.fits" in err
+    assert "Gaia_DR3_12345_phot.fits" not in err
