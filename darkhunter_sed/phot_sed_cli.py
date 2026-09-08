@@ -33,7 +33,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--phot",
         type=Path,
         default=None,
-        help="Path to *_phot.fits (default: output/photometry/Gaia_DR3_<id>_phot.fits)",
+        help="Path to *_phot.fits (default: output/photometry/<id>_phot.fits, same as gather)",
     )
     p.add_argument(
         "--outdir",
@@ -76,6 +76,32 @@ def _normalize_gaia_id(raw: str) -> str:
     return s
 
 
+def default_phot_fits_path(gaia_id: str, phot_dir: Path | None = None) -> Path:
+    """
+    Resolve the default ``*_phot.fits`` path for a Gaia source id.
+
+    Parameters
+    ----------
+    gaia_id :
+        Bare source id digits (after :func:`_normalize_gaia_id`).
+    phot_dir :
+        Photometry directory; default :func:`photometry_dir`.
+
+    Returns
+    -------
+    Path
+        ``{phot_dir}/{gaia_id}_phot.fits`` — same stem as
+        :func:`darkhunter_sed.photometry_gather.save_photometry_to_fits`.
+
+    Limits
+    ------
+    Does not check that the file exists. Does **not** use a ``Gaia_DR3_``
+    filename prefix (gather never wrote that form).
+    """
+    root = phot_dir if phot_dir is not None else photometry_dir()
+    return Path(root).expanduser().resolve() / f"{gaia_id}_phot.fits"
+
+
 def main(argv: list[str] | None = None) -> int:
     """
     Run ``darkhunter-sed-phot``.
@@ -104,7 +130,7 @@ def main(argv: list[str] | None = None) -> int:
     phot_path = (
         Path(args.phot).expanduser().resolve()
         if args.phot is not None
-        else (photometry_dir() / f"Gaia_DR3_{gaia_id}_phot.fits")
+        else default_phot_fits_path(gaia_id)
     )
     if not phot_path.is_file():
         print(f"Photometry FITS not found: {phot_path}", file=sys.stderr)
