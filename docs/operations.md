@@ -44,6 +44,17 @@ $PY -m darkhunter_sed.filters_synphot
 
 `darkhunter_sed.phoenix_grid.PhoenixGrid` indexes `$PHOENIX_DIR` and interpolates Teff / logg / [Fe/H] / [α/Fe] when Alpha dirs exist. `darkhunter_sed.extinction_f99` reddens with `dust_extinction` Fitzpatrick99 (`F99.extinguish`, R_V=3.1) before synphot AB/Vega magnitudes. Unit tests use a mocked tiny wavelength grid (no full HiRes tree in CI).
 
+### Path-2 MISTy + 1-star dynesty
+
+`darkhunter_sed.misty_iso` wraps mistNN under `STELLAR_ROOT` / `DARKHUNTER_SED_MODELS_DIR`. `darkhunter-sed-phot --model 1star` runs dynesty on `EEP, M, [Fe/H], [α/Fe], Av, ϖ`, writing BIC + lnZ summaries under `output/phot_sed/` (`DARKHUNTER_SED_PHOT_SED_DIR`). Uniform priors only in this release (full Path-2 prior module later). Tests inject mock MISTy / synth photometry.
+
+```bash
+export STELLAR_ROOT=/Users/rfoley/stellar
+export PHOENIX_DIR=/Users/rfoley/phoenix/HiResFITS
+export JAX_PLATFORMS=cpu   # recommended on macOS
+darkhunter-sed-phot <gaia_id> --model 1star
+```
+
 Use MacPorts Python for dust Av priors (default anaconda `python3` may lack dustmaps):
 
 ```bash

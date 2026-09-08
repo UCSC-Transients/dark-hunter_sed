@@ -17,6 +17,7 @@ dependencies = [
   "astroquery>=0.4",
   "synphot>=1.4",
   "dust_extinction>=1.2",
+  "dynesty>=2.1",
 ]
 
 [project.optional-dependencies]
@@ -31,6 +32,7 @@ darkhunter-sed-gather-phot = "darkhunter_sed.photometry_gather:main"
 darkhunter-sed-batch = "darkhunter_sed.batch:main"
 darkhunter-sed-push-m1 = "darkhunter_sed.push_m1:main"
 darkhunter-sed-filters = "darkhunter_sed.filters_synphot:_cli"
+darkhunter-sed-phot = "darkhunter_sed.phot_sed_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

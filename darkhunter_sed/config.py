@@ -81,6 +81,17 @@ def photometry_dir() -> Path:
     ).expanduser().resolve()
 
 
+def phot_sed_dir() -> Path:
+    """
+    Path-2 photometry SED fit outputs (dynesty samples / summaries).
+
+    Override with env ``DARKHUNTER_SED_PHOT_SED_DIR``; default ``output/phot_sed/``.
+    """
+    return Path(
+        os.environ.get("DARKHUNTER_SED_PHOT_SED_DIR", output_dir() / "phot_sed")
+    ).expanduser().resolve()
+
+
 def masks_dir() -> Path:
     """Picker regions JSON directory (``regions_Gaia_DR3_<id>_*.json``)."""
     return Path(
