@@ -1,7 +1,7 @@
 """
 CLI entry point ``darkhunter-sed-phot`` for Path-2 photometry SED fits.
 
-This issue supports ``--model 1star`` only.
+Supported models: ``1star``, ``2star``, ``wd``.
 """
 
 from __future__ import annotations
@@ -32,8 +32,31 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--model",
         default="1star",
-        choices=("1star", "2star"),
-        help="SED model: 1star (single star) or 2star (coeval binary; shared chem/Av/parallax)",
+        choices=("1star", "2star", "wd"),
+        help=(
+            "SED model: 1star (single star), 2star (coeval binary), "
+            "or wd (Bergeron DA/DB × Cummings IFMR)"
+        ),
+    )
+    # WD-model-specific arguments.
+    p.add_argument(
+        "--wd-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Directory containing Bergeron Table_DA and Table_DB "
+            "(default: $STELLAR_ROOT/wd or ~/stellar/wd)"
+        ),
+    )
+    p.add_argument(
+        "--system-age",
+        type=float,
+        default=0.0,
+        metavar="GYR",
+        help=(
+            "System age in Gyr for Cummings IFMR progenitor age gate "
+            "(default 0.0 = gate disabled)"
+        ),
     )
     p.add_argument(
         "--phot",
@@ -113,6 +136,22 @@ def _normalize_gaia_id(raw: str) -> str:
     return s
 
 
+def _resolve_wd_dir(cli_path: Path | None) -> Path | None:
+    """Return the Bergeron WD data directory, trying CLI arg, env, then ~/.stellar/wd."""
+    import os
+
+    if cli_path is not None:
+        p = Path(cli_path).expanduser().resolve()
+        return p if p.is_dir() else None
+    stellar_root = os.environ.get("STELLAR_ROOT")
+    if stellar_root:
+        p = Path(stellar_root) / "wd"
+        if p.is_dir():
+            return p
+    p = Path.home() / "stellar" / "wd"
+    return p if p.is_dir() else None
+
+
 def default_phot_fits_path(gaia_id: str, phot_dir: Path | None = None) -> Path:
     """
     Resolve the default ``*_phot.fits`` path for a Gaia source id.
@@ -170,56 +209,99 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Photometry FITS not found: {phot_path}", file=sys.stderr)
         return 1
 
-    rows = read_photometry_fits(phot_path)
-    # Path-2 registry omits WISE_W3/W4 (beyond PHOENIX HiRes); drop if present
-    # in legacy ``*_phot.fits``. W1/W2 kept but still truncated vs PHOENIX —
-    # see filters_synphot / phoenix_grid synthesize_mags notes.
-    from darkhunter_sed.filters_synphot import BAND_REGISTRY
+    all_rows = read_photometry_fits(phot_path)
 
-    _skip = {"WISE_W3", "WISE_W4"}
-    rows = [r for r in rows if r.band not in _skip and r.band in BAND_REGISTRY]
-    if not rows:
-        print(
-            f"No Path-2-registered photometry bands in {phot_path}",
-            file=sys.stderr,
+    if args.model == "wd":
+        # WD model: pass all rows; wd_model.py filters to Bergeron-available bands.
+        rows = all_rows
+        mist_nn = predictor = grid_phx = bandpasses = common_kw = None  # unused
+    else:
+        # PHOENIX models: filter to synphot-registered bands only.
+        from darkhunter_sed.filters_synphot import BAND_REGISTRY
+
+        _skip = {"WISE_W3", "WISE_W4"}
+        rows = [r for r in all_rows if r.band not in _skip and r.band in BAND_REGISTRY]
+        if not rows:
+            print(
+                f"No Path-2-registered photometry bands in {phot_path}",
+                file=sys.stderr,
+            )
+            return 1
+
+        mist_nn = resolve_mist_nn_path(args.mist_nn)
+        predictor = load_misty_predictor(mist_nn)
+        grid_phx = PhoenixGrid(root=args.phoenix_dir)
+        bandpasses = load_bandpasses_for_bands([r.band for r in rows])
+        out_dir = args.outdir if args.outdir is not None else phot_sed_dir()
+
+        common_kw = dict(
+            gaia_id=gaia_id,
+            mist_predictor=predictor,
+            phoenix_grid=grid_phx,
+            out_dir=out_dir,
+            nlive=int(args.nlive),
+            dlogz=float(args.dlogz),
+            maxiter=args.maxiter,
+            seed=int(args.seed),
+            sample=args.sample,
+            bound=args.bound,
+            nworkers=int(args.nworkers),
+            bandpasses=bandpasses,
         )
-        return 1
 
-    mist_nn = resolve_mist_nn_path(args.mist_nn)
-    predictor = load_misty_predictor(mist_nn)
-    grid = PhoenixGrid(root=args.phoenix_dir)
-    bandpasses = load_bandpasses_for_bands([r.band for r in rows])
-    out_dir = args.outdir if args.outdir is not None else phot_sed_dir()
+    if args.model in ("1star", "2star"):
+        if args.model == "1star":
+            result, paths = run_1star_fit(rows, bounds=OneStarPriorBounds(), **common_kw)
+        else:
+            result, paths = run_2star_fit(rows, bounds=TwoStarPriorBounds(), **common_kw)
+        print(
+            f"{args.model} fit gaia_id={gaia_id}  lnZ={result.logz:.3f}±{result.logz_err:.3f}  "
+            f"BIC={result.bic:.3f}  lnL_max={result.ln_l_max:.3f}"
+        )
+        print(f"summary: {paths['summary_json']}")
+        print(f"samples: {paths['samples_npz']}")
 
-    common_kw: dict = dict(
-        gaia_id=gaia_id,
-        mist_predictor=predictor,
-        phoenix_grid=grid,
-        out_dir=out_dir,
-        nlive=int(args.nlive),
-        dlogz=float(args.dlogz),
-        maxiter=args.maxiter,
-        seed=int(args.seed),
-        sample=args.sample,
-        bound=args.bound,
-        nworkers=int(args.nworkers),
-        bandpasses=bandpasses,
-    )
+    elif args.model == "wd":
+        from darkhunter_sed.wd_model import WDPriorBounds, run_wd_fit
 
-    if args.model == "1star":
-        result, paths = run_1star_fit(rows, bounds=OneStarPriorBounds(), **common_kw)
-    elif args.model == "2star":
-        result, paths = run_2star_fit(rows, bounds=TwoStarPriorBounds(), **common_kw)
+        wd_dir = _resolve_wd_dir(args.wd_dir)
+        if wd_dir is None:
+            print(
+                "Cannot locate Bergeron WD tables. "
+                "Set --wd-dir or STELLAR_ROOT env variable.",
+                file=sys.stderr,
+            )
+            return 1
+
+        out_dir = args.outdir if args.outdir is not None else phot_sed_dir()
+        wd_out = Path(out_dir) / gaia_id / "wd"
+        system_age_yr = float(args.system_age) * 1e9
+
+        wd_results = run_wd_fit(
+            rows,
+            wd_dir=wd_dir,
+            system_age_yr=system_age_yr,
+            prior_bounds=WDPriorBounds(),
+            nlive=int(args.nlive),
+            maxiter=args.maxiter,
+            seed=int(args.seed),
+            outdir=wd_out,
+        )
+        for res in wd_results:
+            s = res.summary()
+            print(
+                f"wd fit  atm={s['atm_type']}  ifmr={s['ifmr']}  "
+                f"lnZ={s['logevidence']:.2f}  "
+                f"M_WD={s['m_wd_median']:.3f}+{s['m_wd_hi']-s['m_wd_median']:.3f}"
+                f"-{s['m_wd_median']-s['m_wd_lo']:.3f}  "
+                f"extrap={s['extrap_mass']}"
+            )
+        print(f"wd outputs: {wd_out}")
+
     else:
         print(f"Unsupported model: {args.model}", file=sys.stderr)
         return 2
 
-    print(
-        f"{args.model} fit gaia_id={gaia_id}  lnZ={result.logz:.3f}±{result.logz_err:.3f}  "
-        f"BIC={result.bic:.3f}  lnL_max={result.ln_l_max:.3f}"
-    )
-    print(f"summary: {paths['summary_json']}")
-    print(f"samples: {paths['samples_npz']}")
     return 0
 
 
