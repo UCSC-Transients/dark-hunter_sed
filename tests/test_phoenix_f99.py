@@ -278,3 +278,124 @@ def test_scale_surface_to_earth() -> None:
     r_cm = 3.0856775814913673e18  # 1 pc in cm
     out = scale_surface_to_earth(flux, radius_cm=r_cm, distance_pc=d_pc)
     np.testing.assert_allclose(out, flux, rtol=1e-12)
+
+
+def test_f99_alambda_over_av_path_matches_extinguish() -> None:
+    wave = _tiny_wave()
+    flux = np.full_like(wave, 1.0e-14)
+    a_v = 0.7
+    al = f99_alambda_over_av(wave)
+    out_cached = apply_f99_extinction(
+        wave, flux, a_v, alambda_over_av=al
+    )
+    out_direct = apply_f99_extinction(wave, flux, a_v)
+    np.testing.assert_allclose(out_cached, out_direct, rtol=1e-10)
+
+
+def test_bandpass_wavelength_grid_unique_sorted() -> None:
+    from darkhunter_sed.filters_synphot import bandpass_wavelength_grid
+
+    w1 = np.array([5000.0, 5100.0, 5200.0], dtype=np.float64)
+    w2 = np.array([5150.0, 5200.0, 5300.0], dtype=np.float64)
+    grid = bandpass_wavelength_grid(
+        {"a": _flat_bp(w1, "a"), "b": _flat_bp(w2, "b")}
+    )
+    np.testing.assert_allclose(
+        grid, np.array([5000.0, 5100.0, 5150.0, 5200.0, 5300.0])
+    )
+
+
+def test_photometry_wavelength_grid_matches_hires_mags() -> None:
+    """Bandpass-λ SED path agrees with full-grid extincted + synth."""
+    grid = _mock_grid()
+    bp_wave = np.linspace(4500.0, 7500.0, 48, dtype=np.float64)
+    bp = _flat_bp(bp_wave, "mock_band")
+    bps = {"mock_band": bp}
+
+    grid.set_photometry_wavelengths(None)
+    wave_hi, flux_hi = grid.extincted_spectrum(
+        5100.0, 4.25, 0.0, 0.1, a_v=0.5
+    )
+    assert wave_hi.size == grid.wavelength.size
+    mags_hi = synthesize_mags(
+        wave_hi, flux_hi, ["mock_band"], systems=("ab",), bandpasses=bps
+    )
+
+    from darkhunter_sed.filters_synphot import bandpass_wavelength_grid
+
+    phot_w = bandpass_wavelength_grid(bps)
+    grid.set_photometry_wavelengths(phot_w)
+    wave_ph, flux_ph = grid.extincted_spectrum(
+        5100.0, 4.25, 0.0, 0.1, a_v=0.5
+    )
+    assert wave_ph.size == phot_w.size
+    assert wave_ph.size < grid.wavelength.size
+    mags_ph = synthesize_mags(
+        wave_ph, flux_ph, ["mock_band"], systems=("ab",), bandpasses=bps
+    )
+    assert mags_ph["mock_band"]["ab"] == pytest.approx(
+        mags_hi["mock_band"]["ab"], abs=1e-4
+    )
+
+
+def test_phoenix_synth_phot_sets_phot_grid() -> None:
+    grid = _mock_grid()
+    bp = _flat_bp(np.linspace(5000.0, 7000.0, 32, dtype=np.float64), "mock_band")
+    assert grid._phot_wave is None
+    phoenix_synth_phot(
+        grid,
+        5100.0,
+        4.25,
+        0.0,
+        0.0,
+        a_v=0.2,
+        bands=["mock_band"],
+        bandpasses={"mock_band": bp},
+    )
+    assert grid._phot_wave is not None
+    assert grid._phot_wave.size < grid.wavelength.size
+
+
+def test_phot_grid_extincted_faster_than_long_hires() -> None:
+    """Long mock HiRes: phot-λ extincted_spectrum stays well under HiRes cost."""
+    import time
+
+    wave = np.linspace(3000.0, 11000.0, 80_000, dtype=np.float64)
+    path = Path("/mock/long.fits")
+    pts = [
+        PhoenixPoint(5000.0, 4.5, 0.0, 0.0, path),
+        PhoenixPoint(5200.0, 4.5, 0.0, 0.0, Path("/mock/long2.fits")),
+        PhoenixPoint(5000.0, 4.0, 0.0, 0.0, Path("/mock/long3.fits")),
+        PhoenixPoint(5200.0, 4.0, 0.0, 0.0, Path("/mock/long4.fits")),
+    ]
+    fluxes = {p.path: np.full_like(wave, 1.0e-14 * (1 + 0.01 * i)) for i, p in enumerate(pts)}
+
+    def loader(p: Path) -> np.ndarray:
+        return fluxes[p]
+
+    grid = PhoenixGrid(
+        wavelength=wave,
+        points=pts,
+        flux_loader=loader,
+        to_flam=False,
+        flux_cache_size=8,
+    )
+    # Warm HiRes corners once.
+    grid.extincted_spectrum(5100.0, 4.25, 0.0, 0.0, a_v=0.3)
+    t0 = time.perf_counter()
+    for _ in range(5):
+        grid.extincted_spectrum(5100.0, 4.25, 0.0, 0.0, a_v=0.3)
+    dt_hi = time.perf_counter() - t0
+
+    bp = _flat_bp(np.linspace(4800.0, 5800.0, 200, dtype=np.float64), "g")
+    from darkhunter_sed.filters_synphot import bandpass_wavelength_grid
+
+    grid.set_photometry_wavelengths(bandpass_wavelength_grid({"g": bp}))
+    grid.extincted_spectrum(5100.0, 4.25, 0.0, 0.0, a_v=0.3)  # warm phot cache
+    t1 = time.perf_counter()
+    for _ in range(5):
+        grid.extincted_spectrum(5100.0, 4.25, 0.0, 0.0, a_v=0.3)
+    dt_ph = time.perf_counter() - t1
+    assert dt_ph < dt_hi
+    assert dt_ph < 0.5, f"phot-λ extincted_spectrum too slow: {dt_ph:.3f}s"
+
