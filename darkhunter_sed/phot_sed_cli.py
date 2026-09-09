@@ -110,6 +110,24 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     p.add_argument(
+        "--stride",
+        type=int,
+        default=1,
+        metavar="N",
+        help=(
+            "Subsample the bandpass wavelength grid by N before PHOENIX integration "
+            "(default 1 = full resolution). Values 4–10 give ~4–10× speedup with "
+            "negligible accuracy loss for broad-band photometry — useful for a fast "
+            "exploratory run; rerun at stride=1 for final results."
+        ),
+    )
+    p.add_argument(
+        "--print-progress",
+        action="store_true",
+        default=False,
+        help="Print dynesty progress (lnZ, ncall, remaining work) to stdout ~every 1000 iter.",
+    )
+    p.add_argument(
         "--mist-nn",
         type=Path,
         default=None,
@@ -218,9 +236,14 @@ def main(argv: list[str] | None = None) -> int:
     else:
         # PHOENIX models: filter to synphot-registered bands only.
         from darkhunter_sed.filters_synphot import BAND_REGISTRY
+        from darkhunter_sed.phot_sed_fit import _GAIA_CONSTRAINT_BANDS
 
         _skip = {"WISE_W3", "WISE_W4"}
-        rows = [r for r in all_rows if r.band not in _skip and r.band in BAND_REGISTRY]
+        rows = [
+            r for r in all_rows
+            if r.band not in _skip
+            and (r.band in BAND_REGISTRY or r.band in _GAIA_CONSTRAINT_BANDS)
+        ]
         if not rows:
             print(
                 f"No Path-2-registered photometry bands in {phot_path}",
@@ -247,6 +270,8 @@ def main(argv: list[str] | None = None) -> int:
             bound=args.bound,
             nworkers=int(args.nworkers),
             bandpasses=bandpasses,
+            spec_stride=int(args.stride),
+            print_progress=bool(args.print_progress),
         )
 
     if args.model in ("1star", "2star"):

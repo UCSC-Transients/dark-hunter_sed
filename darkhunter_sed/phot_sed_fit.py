@@ -173,6 +173,10 @@ def photometry_loglike(
         err = float(row.err)
         if err <= 0.0 or not math.isfinite(err):
             raise ValueError(f"Invalid err for band {row.band}")
+        if not math.isfinite(m_mod):
+            # NaN/inf model magnitude (e.g. zero-flux prediction): treat as
+            # very faint (99 mag) so detections get a large finite penalty.
+            m_mod = 99.0
         if row.flag == FLAG_DETECTION:
             resid = (float(row.mag) - m_mod) / err
             total += -0.5 * resid * resid - math.log(err) - ln_norm
@@ -233,6 +237,16 @@ def load_bandpasses_for_bands(
     return out
 
 
+_PLX_BAND = "Gaia_parallax"
+_PLX_PARAM_IDX = 5  # parallax_mas is the 6th element of OneStarParams (0-indexed)
+_PLX_SIGMA_CLIP = 5.0  # tight flat prior spans ± this many σ around observed plx
+_TEFF_BAND = "Gaia_Teff"
+_LOGG_BAND = "Gaia_logg"
+_MH_BAND = "Gaia_MH"
+_FEH_PARAM_IDX = 2  # feh is the 3rd element of OneStarParams (0-indexed)
+_GAIA_CONSTRAINT_BANDS = frozenset({_PLX_BAND, _TEFF_BAND, _LOGG_BAND, _MH_BAND})
+
+
 def fit_1star_dynesty(
     rows: Sequence[PhotRow],
     *,
@@ -250,6 +264,8 @@ def fit_1star_dynesty(
     bound: str = "multi",
     nworkers: int = 1,
     jit_warmup: bool = True,
+    spec_stride: int = 1,
+    print_progress: bool = False,
 ) -> FitResult1Star:
     """
     Run dynesty nested sampling on the 1-star Path-2 model.
@@ -284,6 +300,17 @@ def fit_1star_dynesty(
         point before constructing the ``NestedSampler``.  This forces JAX
         JIT compilation to happen outside the dynesty timing, saving
         10–30 s on the first live-point evaluation.
+    spec_stride :
+        Subsample the bandpass wavelength grid by this factor before passing
+        it to :meth:`PhoenixGrid.set_photometry_wavelengths`.  ``1`` (default)
+        uses every point.  Values of 4–10 reduce per-call interpolation and
+        trapz cost proportionally with minimal accuracy loss for broad-band
+        photometry — useful for a fast exploratory run that can seed priors
+        for a subsequent full-resolution run (``spec_stride=1``).
+    print_progress :
+        Forward dynesty's ``print_progress`` flag.  When ``True``, dynesty
+        prints a one-line status (lnZ, remaining work, ncall) to stdout every
+        ~1000 iterations so you can monitor long fits.
     bandpasses, mag_system :
         Photometry system / injectable thruputs. When ``bandpasses`` is
         ``None`` and a real ``phoenix_grid`` path is used, bandpasses are
@@ -311,9 +338,37 @@ def fit_1star_dynesty(
 
     if not rows:
         raise ValueError("rows must be non-empty")
+
+    # Separate Gaia constraint rows (parallax, Teff, logg, MH) from photometric rows.
+    plx_rows = [r for r in rows if r.band == _PLX_BAND]
+    teff_rows = [r for r in rows if r.band == _TEFF_BAND]
+    logg_rows = [r for r in rows if r.band == _LOGG_BAND]
+    mh_rows = [r for r in rows if r.band == _MH_BAND]
+    phot_rows = [r for r in rows if r.band not in _GAIA_CONSTRAINT_BANDS]
+    if not phot_rows:
+        raise ValueError("rows contains only Gaia constraints; need photometric bands too")
+
+    # Tighten flat priors from Gaia constraints so dynesty doesn't waste live
+    # points in regions that have essentially zero likelihood.
     prior = bounds if bounds is not None else OneStarPriorBounds()
+    if bounds is None and (plx_rows or mh_rows):
+        tight_kw: dict[str, tuple[float, float]] = {}
+        if plx_rows:
+            plx_obs = plx_rows[0].mag
+            plx_err = plx_rows[0].err
+            lo = max(DEFAULT_PARALLAX_BOUNDS[0], plx_obs - _PLX_SIGMA_CLIP * plx_err)
+            hi = min(DEFAULT_PARALLAX_BOUNDS[1], plx_obs + _PLX_SIGMA_CLIP * plx_err)
+            tight_kw["parallax_mas"] = (lo, hi)
+        if mh_rows:
+            mh_obs = mh_rows[0].mag
+            mh_err = mh_rows[0].err
+            lo_f = max(DEFAULT_FEH_BOUNDS[0], mh_obs - _PLX_SIGMA_CLIP * mh_err)
+            hi_f = min(DEFAULT_FEH_BOUNDS[1], mh_obs + _PLX_SIGMA_CLIP * mh_err)
+            tight_kw["feh"] = (lo_f, hi_f)
+        prior = OneStarPriorBounds(**tight_kw)
+
     bound_list = prior.as_list()
-    bands = [r.band for r in rows]
+    bands = [r.band for r in phot_rows]
     ndim = len(ONE_STAR_PARAM_NAMES)
 
     bps = bandpasses
@@ -322,7 +377,10 @@ def fit_1star_dynesty(
     if phoenix_grid is not None and bps is not None:
         from darkhunter_sed.filters_synphot import bandpass_wavelength_grid
 
-        phoenix_grid.set_photometry_wavelengths(bandpass_wavelength_grid(bps))
+        wave_grid = bandpass_wavelength_grid(bps)
+        if spec_stride > 1:
+            wave_grid = wave_grid[::int(spec_stride)]
+        phoenix_grid.set_photometry_wavelengths(wave_grid)
 
     # Warm up JAX JIT before dynesty allocates live points.  The first call
     # to a jax.jit-wrapped function triggers trace+compile (~10-30 s for
@@ -361,7 +419,23 @@ def fit_1star_dynesty(
             )
         except Exception:
             return -np.inf
-        return photometry_loglike(pred.mags, rows)
+        lnl = photometry_loglike(pred.mags, phot_rows)
+        # Gaia parallax Gaussian constraint: theta[5] is parallax_mas directly.
+        for pr in plx_rows:
+            resid = (float(theta[_PLX_PARAM_IDX]) - pr.mag) / pr.err
+            lnl += -0.5 * resid * resid
+        # Gaia GSP-Phot FeH constraint: theta[2] is feh directly.
+        for mr in mh_rows:
+            resid = (float(theta[_FEH_PARAM_IDX]) - mr.mag) / mr.err
+            lnl += -0.5 * resid * resid
+        # Gaia GSP-Phot Teff/logg constraints from the MIST prediction.
+        for tr in teff_rows:
+            resid = (pred.mist.teff_k - tr.mag) / tr.err
+            lnl += -0.5 * resid * resid
+        for lr in logg_rows:
+            resid = (pred.mist.logg - lr.mag) / lr.err
+            lnl += -0.5 * resid * resid
+        return lnl
 
     pool: Any = None
     queue_size: int | None = None
@@ -381,7 +455,10 @@ def fit_1star_dynesty(
             pool=pool,
             queue_size=queue_size,
         )
-        run_kw: dict[str, Any] = {"print_progress": False, "dlogz": float(dlogz)}
+        run_kw: dict[str, Any] = {
+            "print_progress": bool(print_progress),
+            "dlogz": float(dlogz),
+        }
         if maxiter is not None:
             run_kw["maxiter"] = int(maxiter)
         sampler.run_nested(**run_kw)
@@ -520,13 +597,15 @@ def run_1star_fit(
     bound: str = "multi",
     nworkers: int = 1,
     jit_warmup: bool = True,
+    spec_stride: int = 1,
+    print_progress: bool = False,
 ) -> tuple[FitResult1Star, dict[str, Path]]:
     """
     Fit 1-star + write ``output/phot_sed/`` products.
 
     Parameters
     ----------
-    dlogz, sample, bound, nworkers, jit_warmup :
+    dlogz, sample, bound, nworkers, jit_warmup, spec_stride, print_progress :
         Forwarded to :func:`fit_1star_dynesty`; see that function for details.
 
     See also :func:`fit_1star_dynesty` and :func:`write_1star_outputs`.
@@ -546,8 +625,10 @@ def run_1star_fit(
         bound=bound,
         nworkers=nworkers,
         jit_warmup=jit_warmup,
+        spec_stride=spec_stride,
+        print_progress=print_progress,
     )
-    bands = [r.band for r in rows]
+    bands = [r.band for r in rows if r.band not in _GAIA_CONSTRAINT_BANDS]
     bps = bandpasses
     if bps is None and synth_phot is None:
         bps = load_bandpasses_for_bands(bands)
@@ -664,6 +745,8 @@ def fit_2star_dynesty(
     nworkers: int = 1,
     jit_warmup: bool = True,
     eep2_xtol: float = 0.5,
+    spec_stride: int = 1,
+    print_progress: bool = False,
 ) -> FitResult2Star:
     """
     Run dynesty nested sampling on the 2-star coeval Path-2 model.
@@ -678,7 +761,8 @@ def fit_2star_dynesty(
         Forward model; one of them required.
     bounds :
         Uniform prior bounds; default is :class:`TwoStarPriorBounds`.
-    nlive, maxiter, seed, dlogz, sample, bound, nworkers, jit_warmup :
+    nlive, maxiter, seed, dlogz, sample, bound, nworkers, jit_warmup,
+    spec_stride, print_progress :
         Dynesty / performance controls; see :func:`fit_1star_dynesty`.
     eep2_xtol :
         EEP tolerance for the coeval solver (passed to
@@ -713,7 +797,10 @@ def fit_2star_dynesty(
     if phoenix_grid is not None and bps is not None:
         from darkhunter_sed.filters_synphot import bandpass_wavelength_grid
 
-        phoenix_grid.set_photometry_wavelengths(bandpass_wavelength_grid(bps))
+        wave_grid = bandpass_wavelength_grid(bps)
+        if spec_stride > 1:
+            wave_grid = wave_grid[::int(spec_stride)]
+        phoenix_grid.set_photometry_wavelengths(wave_grid)
 
     # JIT warm-up: drive MISTy compilation before sampler allocates live points.
     if jit_warmup:
@@ -773,7 +860,10 @@ def fit_2star_dynesty(
             pool=pool,
             queue_size=queue_size,
         )
-        run_kw: dict[str, Any] = {"print_progress": False, "dlogz": float(dlogz)}
+        run_kw: dict[str, Any] = {
+            "print_progress": bool(print_progress),
+            "dlogz": float(dlogz),
+        }
         if maxiter is not None:
             run_kw["maxiter"] = int(maxiter)
         sampler.run_nested(**run_kw)
@@ -912,13 +1002,15 @@ def run_2star_fit(
     nworkers: int = 1,
     jit_warmup: bool = True,
     eep2_xtol: float = 0.5,
+    spec_stride: int = 1,
+    print_progress: bool = False,
 ) -> tuple[FitResult2Star, dict[str, Path]]:
     """
     Fit 2-star coeval + write ``output/phot_sed/`` products.
 
     Parameters
     ----------
-    eep2_xtol :
+    eep2_xtol, spec_stride, print_progress :
         Forwarded to :func:`fit_2star_dynesty`.
 
     See also :func:`fit_2star_dynesty` and :func:`write_2star_outputs`.
@@ -939,6 +1031,8 @@ def run_2star_fit(
         nworkers=nworkers,
         jit_warmup=jit_warmup,
         eep2_xtol=eep2_xtol,
+        spec_stride=spec_stride,
+        print_progress=print_progress,
     )
     bands = [r.band for r in rows]
     bps = bandpasses

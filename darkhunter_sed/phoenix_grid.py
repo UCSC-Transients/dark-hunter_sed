@@ -49,12 +49,16 @@ FluxLoader = Callable[[Path], NDArray[np.floating]]
 _WAVE_NAME = "WAVE_PHOENIX-ACES-AGSS-COND-2011.fits"
 _GRID_SUBDIR = "PHOENIX-ACES-AGSS-COND-2011"
 
-# Max cached resampled-photometry flux arrays in :meth:`PhoenixGrid._load_for_sed`
-# (and full HiRes in :meth:`PhoenixGrid._load`).  4096 holds ~500 MB of resampled
-# spectra on the typical 3–4 k-point bandpass-λ grid; large enough that a 100-live-
-# point dynesty run across the full (EEP, mass, [Fe/H]) prior never thrashes the
-# cache.  Set smaller only when memory is tight.
+# Max cached resampled-photometry flux arrays in :meth:`PhoenixGrid._load_for_sed`.
+# 4096 entries × ~25 KB each ≈ 100 MB — large enough that a 200-live-point dynesty
+# run never thrashes the cache.
 _DEFAULT_FLUX_CACHE_SIZE = 4096
+
+# Max cached full HiRes flux arrays in :meth:`PhoenixGrid._load`.
+# Each HiRes array is 1.57 M points × 8 B ≈ 12.5 MB; 32 entries ≈ 400 MB.
+# Only the 8 interpolation corners of the current call need to be hot, so 32
+# is more than enough and avoids the ~51 GB explosion that 4096 would cause.
+_DEFAULT_HIRES_CACHE_SIZE = 32
 
 # Directory: Z-0.0 or Z-0.0.Alpha=+0.20
 _DIR_RE = re.compile(
@@ -373,10 +377,12 @@ class PhoenixGrid:
         flux_loader: FluxLoader | None = None,
         to_flam: bool = True,
         flux_cache_size: int = _DEFAULT_FLUX_CACHE_SIZE,
+        hires_cache_size: int = _DEFAULT_HIRES_CACHE_SIZE,
     ) -> None:
         self.root = phoenix_dir(root)
         self.to_flam = bool(to_flam)
         self._flux_loader = flux_loader
+        self._hires_cache_size = max(int(hires_cache_size), 0)
         self._flux_cache_size = max(int(flux_cache_size), 0)
         self._flux_cache: OrderedDict[Path, NDArray[np.float64]] = OrderedDict()
         # Optional photometry λ grid: dynesty evaluates SED here, not on HiRes.
@@ -472,7 +478,7 @@ class PhoenixGrid:
 
         Limits
         ------
-        Cache size is :attr:`_flux_cache_size` (default 128). Injected
+        Cache size is :attr:`_hires_cache_size` (default 32; ~400 MB). Injected
         ``flux_loader`` results are also cached by ``point.path``.
         """
         key = point.path
@@ -489,10 +495,10 @@ class PhoenixGrid:
                 f"Flux length {flux.size} != wavelength {self.wavelength.size} "
                 f"for {point.path}"
             )
-        if self._flux_cache_size > 0:
+        if self._hires_cache_size > 0:
             self._flux_cache[key] = flux
             self._flux_cache.move_to_end(key)
-            while len(self._flux_cache) > self._flux_cache_size:
+            while len(self._flux_cache) > self._hires_cache_size:
                 self._flux_cache.popitem(last=False)
         return flux
 
@@ -858,8 +864,14 @@ def _abmag_from_flam_on_bandpass(
     wgt = throughput[order] / nu_s
     num = float(np.trapz(fnu[order] * wgt, nu_s))
     den = float(np.trapz(wgt, nu_s))
-    if den <= 0.0 or num <= 0.0 or not np.isfinite(num) or not np.isfinite(den):
+    if den <= 0.0 or not np.isfinite(den):
         return float("nan")
+    if num <= 0.0 or not np.isfinite(num):
+        # Zero or negative integrated flux (e.g. cool star in UV bandpass):
+        # return a very faint sentinel magnitude rather than NaN so the
+        # Gaussian likelihood returns a large but finite penalty and dynesty
+        # can still follow the gradient toward hotter/brighter models.
+        return 99.0
     return float(-2.5 * np.log10(num / den) - 48.60)
 
 
