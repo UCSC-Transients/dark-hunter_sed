@@ -82,7 +82,7 @@ Swift **catalog gather** is not implemented yet (filters/registry only).
 
 ### Path-2 PHOENIX + F99
 
-Forward photometry loads HiRes spectra from `$PHOENIX_DIR` (Teff, logg, [Fe/H], and [α/Fe] when Alpha-tagged directories exist), applies Fitzpatrick (1999) extinction at **R_V=3.1** via `dust_extinction.F99.extinguish`, then synthesizes AB/Vega mags with synphot registry bandpasses (`darkhunter_sed.phoenix_grid`, `darkhunter_sed.extinction_f99`).
+Forward photometry loads HiRes spectra from `$PHOENIX_DIR` (Teff, logg, [Fe/H], and [α/Fe] when Alpha-tagged directories exist), applies Fitzpatrick (1999) extinction at **R_V=3.1** via `dust_extinction.F99.extinguish` to the **full** (diluted) SED, **then** synthesizes AB mags on bandpass-native wavelength grids (`darkhunter_sed.phoenix_grid`, `darkhunter_sed.extinction_f99`). Multi-component models must **sum → F99 → synth** (not per-star magnitudes). HiRes arrays are not passed wholesale into synphot `Observation` (too slow).
 
 ```bash
 export PHOENIX_DIR=/Users/rfoley/phoenix/HiResFITS

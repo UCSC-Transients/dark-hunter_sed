@@ -11,11 +11,19 @@ Layout expected under ``PHOENIX_DIR`` (default ``/Users/rfoley/phoenix/HiResFITS
 
 Flux files store surface flux density in ``erg/s/cm^2/cm`` (per cm of
 wavelength). This module converts to FLAM (``erg/s/cm^2/Å``) for synphot.
+
+Path-2 SED order (absolute)
+---------------------------
+Dilute each luminous component to Earth → **sum** fluxes on a common λ grid →
+apply F99 (R_V=3.1) to the **combined** SED → **then** synthesize photometry
+(:func:`synthesize_mags`). Multi-star / WD / IR-BB models must use the same
+combine → redden → synth sequence (never stack per-component magnitudes).
 """
 
 from __future__ import annotations
 
 import re
+from collections import OrderedDict
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -32,6 +40,9 @@ FluxLoader = Callable[[Path], NDArray[np.floating]]
 # Shared wavelength product shipped with the HiRes tree.
 _WAVE_NAME = "WAVE_PHOENIX-ACES-AGSS-COND-2011.fits"
 _GRID_SUBDIR = "PHOENIX-ACES-AGSS-COND-2011"
+
+# Max cached HiRes flux arrays in :meth:`PhoenixGrid._load` (dynesty reuse).
+_DEFAULT_FLUX_CACHE_SIZE = 128
 
 # Directory: Z-0.0 or Z-0.0.Alpha=+0.20
 _DIR_RE = re.compile(
@@ -346,10 +357,13 @@ class PhoenixGrid:
         points: Sequence[PhoenixPoint] | None = None,
         flux_loader: FluxLoader | None = None,
         to_flam: bool = True,
+        flux_cache_size: int = _DEFAULT_FLUX_CACHE_SIZE,
     ) -> None:
         self.root = phoenix_dir(root)
         self.to_flam = bool(to_flam)
         self._flux_loader = flux_loader
+        self._flux_cache_size = max(int(flux_cache_size), 0)
+        self._flux_cache: OrderedDict[Path, NDArray[np.float64]] = OrderedDict()
         if wavelength is not None:
             self.wavelength = np.asarray(wavelength, dtype=np.float64).reshape(-1)
         else:
@@ -411,6 +425,29 @@ class PhoenixGrid:
         return tuple(sorted({p.mh for p in self._points}))
 
     def _load(self, point: PhoenixPoint) -> NDArray[np.float64]:
+        """
+        Load surface FLAM for one grid point (LRU-cached).
+
+        Parameters
+        ----------
+        point :
+            Indexed :class:`PhoenixPoint`.
+
+        Returns
+        -------
+        NDArray[np.float64]
+            Flux on :attr:`wavelength` (same length).
+
+        Limits
+        ------
+        Cache size is :attr:`_flux_cache_size` (default 128). Injected
+        ``flux_loader`` results are also cached by ``point.path``.
+        """
+        key = point.path
+        cached = self._flux_cache.get(key)
+        if cached is not None:
+            self._flux_cache.move_to_end(key)
+            return cached
         if self._flux_loader is not None:
             flux = np.asarray(self._flux_loader(point.path), dtype=np.float64)
         else:
@@ -420,6 +457,11 @@ class PhoenixGrid:
                 f"Flux length {flux.size} != wavelength {self.wavelength.size} "
                 f"for {point.path}"
             )
+        if self._flux_cache_size > 0:
+            self._flux_cache[key] = flux
+            self._flux_cache.move_to_end(key)
+            while len(self._flux_cache) > self._flux_cache_size:
+                self._flux_cache.popitem(last=False)
         return flux
 
     def nearest_point(
@@ -648,29 +690,77 @@ def _key(teff: float, logg: float, mh: float, alpha: float) -> tuple[float, floa
     )
 
 
+
+def _abmag_from_flam_on_bandpass(
+    wave_src: NDArray[np.float64],
+    flux_flam: NDArray[np.float64],
+    wave_bp: NDArray[np.float64],
+    throughput: NDArray[np.float64],
+) -> float:
+    """
+    Photon-weighted AB magnitude matching synphot ``effstim('abmag')``.
+
+    Parameters
+    ----------
+    wave_src, flux_flam :
+        Source SED (Å, FLAM), already reddened.
+    wave_bp, throughput :
+        Bandpass wavelength (Å) and dimensionless throughput on ``wave_bp``.
+
+    Returns
+    -------
+    float
+        AB magnitude.
+
+    Limits
+    ------
+    Uses ``m = -2.5 log10(∫ f_ν S dν/ν / ∫ S dν/ν) - 48.60`` with
+    ``f_ν = f_λ λ²/c`` (c in Å/s). Samples outside ``wave_src`` get zero flux.
+    """
+    # Speed of light in Å/s for F_λ (erg/s/cm²/Å) → F_ν (erg/s/cm²/Hz).
+    c_aa = 2.99792458e18
+    flux_bp = np.interp(wave_bp, wave_src, flux_flam)
+    outside = (wave_bp < wave_src[0]) | (wave_bp > wave_src[-1])
+    if np.any(outside):
+        flux_bp = flux_bp.copy()
+        flux_bp[outside] = 0.0
+    fnu = flux_bp * (wave_bp * wave_bp) / c_aa
+    nu = c_aa / wave_bp
+    order = np.argsort(nu)
+    nu_s = nu[order]
+    wgt = throughput[order] / nu_s
+    num = float(np.trapz(fnu[order] * wgt, nu_s))
+    den = float(np.trapz(wgt, nu_s))
+    if den <= 0.0 or num <= 0.0 or not np.isfinite(num) or not np.isfinite(den):
+        return float("nan")
+    return float(-2.5 * np.log10(num / den) - 48.60)
+
+
 def synthesize_mags(
     wave_aa: NDArray[np.floating],
     flux_flam: NDArray[np.floating],
     bands: Sequence[str],
     *,
-    systems: Sequence[str] = ("ab", "vega"),
+    systems: Sequence[str] = ("ab",),
     bandpasses: Mapping[str, object] | None = None,
     cdbs_root: Path | str | None = None,
 ) -> dict[str, dict[str, float]]:
     """
-    Synthesize AB and/or Vega magnitudes for Path-2 registry bands.
+    Synthesize AB and/or Vega magnitudes from a **post-reddening** SED.
 
     Parameters
     ----------
     wave_aa :
-        Wavelengths in Angstroms.
+        Wavelengths in Angstroms (common system grid).
     flux_flam :
-        Flux density in FLAM (``erg/s/cm^2/Å``), already extincted/diluted as
-        desired.
+        Flux density in FLAM (``erg/s/cm^2/Å``). Must already be geometrically
+        diluted and **F99-reddened** (or be the sum of diluted components after
+        a single F99 on the combined SED). This function does **not** apply
+        extinction.
     bands :
         Registry band names (e.g. ``PS_g``, ``GaiaDR3_G``).
     systems :
-        Subset of ``{"ab", "vega"}`` (case-insensitive).
+        Subset of ``{"ab", "vega"}`` (case-insensitive). Default AB only.
     bandpasses :
         Optional mapping ``band → synphot.SpectralElement``. When omitted,
         loads via :func:`darkhunter_sed.filters_synphot.load_bandpass`.
@@ -685,22 +775,20 @@ def synthesize_mags(
 
     Limits
     ------
-    Requires ``synphot``. Vega uses :meth:`synphot.SourceSpectrum.from_vega`.
-    Bandpasses must overlap the spectrum; zero-thruput or non-overlap raises
-    from synphot. Does **not** apply extinction (caller should use F99 first).
+    Path-2 order: dilute → **sum components** → F99 on the full SED → **then**
+    this function. Multi-star/WD/BB must not synthesize per component and stack
+    magnitudes.
 
-    WISE / PHOENIX red cutoff
-    ------------------------
-    PHOENIX ACES HiRes WAVE tops out near 55_000 Å (~5.5 μm). WISE_W1/W2
-    thruputs extend past that edge, so ``Observation(..., force="taper")``
-    logs ``Source spectrum is tapered`` and the mid-IR integral is missing
-    long-λ flux — leave for later examination. WISE_W3/W4 are not in the
-    Path-2 registry. A redward extension of the PHOENIX (or system) SED may
-    be required before WISE mags are trustworthy.
+    Performance: AB uses a vectorized photon-weighted integral on each
+    bandpass ``waveset`` (no synphot ``Observation`` on the HiRes grid).
+    Vega (if requested) still uses synphot on the bandpass-native source only.
+    Broadband filters do not need R~500000 sampling inside the integral.
+
+    Samples outside the source λ range are set to 0 (taper-like) so WISE_W1/W2
+    still integrate with missing long-λ flux — examine later; may need a
+    PHOENIX/SED red extension.
     """
-    from synphot import Observation, SourceSpectrum, SpectralElement
-    from synphot.models import Empirical1D
-    from synphot.units import FLAM
+    from synphot import SpectralElement
     from astropy import units as u
 
     wave = np.asarray(wave_aa, dtype=np.float64)
@@ -709,19 +797,25 @@ def synthesize_mags(
         raise ValueError("wave_aa and flux_flam must be equal-length 1-D arrays")
     if wave.size < 2:
         raise ValueError("Need ≥2 wavelength samples")
+    if not np.all(np.diff(wave) > 0.0):
+        order = np.argsort(wave)
+        wave = wave[order]
+        flux = flux[order]
 
     sys_set = {s.lower() for s in systems}
     unknown = sys_set - {"ab", "vega"}
     if unknown:
         raise ValueError(f"Unknown magnitude systems: {sorted(unknown)}")
 
-    source = SourceSpectrum(
-        Empirical1D,
-        points=wave * u.AA,
-        lookup_table=flux * FLAM,
-    )
+    need_vega = "vega" in sys_set
+    if need_vega:
+        from synphot import Observation, SourceSpectrum
+        from synphot.models import Empirical1D
+        from synphot.units import FLAM
+        import warnings
 
-    vega_spec = SourceSpectrum.from_vega() if "vega" in sys_set else None
+        vega_spec = SourceSpectrum.from_vega()
+
     out: dict[str, dict[str, float]] = {}
 
     for band in bands:
@@ -733,14 +827,32 @@ def synthesize_mags(
             bp = load_bandpass(band, cdbs_root=cdbs_root)
         if not isinstance(bp, SpectralElement):
             raise TypeError(f"Bandpass for {band} is not a SpectralElement")
-        # force="taper": allow partial overlap (notably WISE_W1/W2 vs PHOENIX
-        # red end); see docstring note above about missing mid-IR flux.
-        obs = Observation(source, bp, force="taper")
+        bp_waves = bp.waveset
+        if bp_waves is None or len(bp_waves) < 2:
+            raise ValueError(f"Bandpass {band} has no usable waveset")
+        wave_bp = np.asarray(bp_waves.to(u.AA).value, dtype=np.float64)
+        thru = np.asarray(bp(bp_waves).value, dtype=np.float64)
         entry: dict[str, float] = {}
         if "ab" in sys_set:
-            entry["ab"] = float(obs.effstim("abmag").value)
-        if "vega" in sys_set:
-            assert vega_spec is not None
+            entry["ab"] = _abmag_from_flam_on_bandpass(wave, flux, wave_bp, thru)
+        if need_vega:
+            flux_bp = np.interp(wave_bp, wave, flux)
+            outside = (wave_bp < wave[0]) | (wave_bp > wave[-1])
+            if np.any(outside):
+                flux_bp = flux_bp.copy()
+                flux_bp[outside] = 0.0
+            source = SourceSpectrum(
+                Empirical1D,
+                points=wave_bp * u.AA,
+                lookup_table=flux_bp * FLAM,
+            )
+            with warnings.catch_warnings():
+                warnings.filterwarnings(
+                    "ignore",
+                    message="Source spectrum is tapered",
+                    module="synphot.observation",
+                )
+                obs = Observation(source, bp, force="taper")
             entry["vega"] = float(obs.effstim("vegamag", vegaspec=vega_spec).value)
         out[band] = entry
     return out
@@ -757,19 +869,19 @@ def phoenix_synth_phot(
     *,
     radius_cm: float | None = None,
     distance_pc: float | None = None,
-    systems: Sequence[str] = ("ab", "vega"),
+    systems: Sequence[str] = ("ab",),
     bandpasses: Mapping[str, object] | None = None,
     r_v: float = DEFAULT_R_V,
 ) -> dict[str, dict[str, float]]:
     """
-    End-to-end Path-2 forward photometry: PHOENIX → F99 → synphot mags.
+    End-to-end Path-2 forward photometry: PHOENIX → dilute → F99 → synth mags.
 
     Parameters
     ----------
     grid :
         :class:`PhoenixGrid` instance (real or mocked).
     teff_k, logg, mh, alpha, a_v :
-        Atmosphere + extinction.
+        Atmosphere + extinction (F99 applied to this single-star SED).
     bands :
         Registry band names.
     radius_cm, distance_pc :
@@ -784,6 +896,8 @@ def phoenix_synth_phot(
 
     Limits
     ------
+    1-star convenience wrapper. Multi-component models must sum diluted
+    spectra, call F99 once on the sum, then :func:`synthesize_mags`.
     Same as :meth:`PhoenixGrid.extincted_spectrum` and :func:`synthesize_mags`.
     """
     wave, flux = grid.extincted_spectrum(
