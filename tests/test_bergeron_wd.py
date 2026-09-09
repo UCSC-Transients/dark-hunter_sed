@@ -205,8 +205,8 @@ class TestCummingsIFMR:
     @pytest.mark.parametrize("variant", ["MIST", "PARSEC"])
     def test_forward_outside_grid_nan(self, variant: str) -> None:
         ifmr = CummingsIFMR(variant)  # type: ignore[arg-type]
-        assert math.isnan(ifmr.final_mass(0.5))   # below Mi_MIN
-        assert math.isnan(ifmr.final_mass(10.0))  # above Mi_MAX
+        assert math.isnan(ifmr.final_mass(0.5))    # below both Mi_MIN values
+        assert math.isnan(ifmr.final_mass(100.0))  # above both Mi_MAX values
 
     @pytest.mark.parametrize("variant", ["MIST", "PARSEC"])
     def test_round_trip(self, variant: str) -> None:

@@ -16,8 +16,9 @@ Variants
     Uses MIST stellar lifetimes; preferred for consistency with the Path-2
     MIST isochrone pipeline.
 
-Each variant is a piecewise linear function with breakpoints at
-Mi = 2.85 and 3.60 M_sun.
+Breakpoints and Mi ranges differ by variant:
+    PARSEC (eqs 1–3):  0.87 ≤ Mi ≤ 8.20, breaks at 2.80 and 3.65 M_sun.
+    MIST   (eqs 4–6):  0.83 ≤ Mi ≤ 7.20, breaks at 2.85 and 3.60 M_sun.
 
 Age gate
 --------
@@ -29,11 +30,10 @@ uses the Hurley et al. 2000 (MNRAS 315, 543) power-law approximation
 
 Limits
 ------
-- IFMR is only valid for 1.16 ≤ Mi ≤ 7.20 M_sun (Cummings+2018 data range).
-  Input outside this range returns a sentinel ``nan`` from ``final_mass``.
+- PARSEC valid for 0.87 ≤ Mi ≤ 8.20 M_sun; MIST valid for 0.83 ≤ Mi ≤ 7.20 M_sun.
+  Input outside the respective range returns ``nan`` from ``final_mass``.
 - ``initial_mass`` inverts each linear segment analytically; returns ``nan``
   if Mf does not fall within the expected range of any segment.
-- VERIFY coefficients against Cummings+2018 Table 1 directly before science use.
 """
 
 from __future__ import annotations
@@ -57,25 +57,21 @@ IFMRVariant = Literal["MIST", "PARSEC"]
 # Source: Cummings+2018 ApJ 866 21, Table 1.
 # PARSEC eqs 1-3; MIST eqs 4-6.
 
-_MI_BREAK1 = 2.85   # M_sun
-_MI_BREAK2 = 3.60   # M_sun
-_MI_MIN    = 1.16   # M_sun  (lower data boundary)
-_MI_MAX    = 7.20   # M_sun  (upper data boundary)
-
-# Segment definitions: (Mi_lo_exclusive, Mi_hi_inclusive, slope, intercept)
-# The lowest segment includes Mi_MIN; highest includes Mi_MAX.
+# Segment definitions: (Mi_lo, Mi_hi, slope, intercept)
+# Source: Cummings+2018 ApJ 866 21, Table 1 (equations as labelled in the paper).
+# PARSEC and MIST have different breakpoints and Mi ranges.
 _IFMR_SEGMENTS: dict[IFMRVariant, tuple[tuple[float, float, float, float], ...]] = {
-    # PARSEC (eqs 1–3 of Cummings+2018):
+    # PARSEC (eqs 1–3):  0.87 ≤ Mi ≤ 8.20; breaks at 2.80 and 3.65.
     "PARSEC": (
-        (_MI_MIN,    _MI_BREAK1, 0.0873, 0.476),   # eq 1
-        (_MI_BREAK1, _MI_BREAK2, 0.181,  0.210),   # eq 2
-        (_MI_BREAK2, _MI_MAX,    0.152,  0.312),   # eq 3
+        (0.87, 2.80, 0.0873, 0.476),   # eq 1
+        (2.80, 3.65, 0.181,  0.210),   # eq 2
+        (3.65, 8.20, 0.0835, 0.565),   # eq 3
     ),
-    # MIST (eqs 4–6 of Cummings+2018):
+    # MIST (eqs 4–6):    0.83 ≤ Mi ≤ 7.20; breaks at 2.85 and 3.60.
     "MIST": (
-        (_MI_MIN,    _MI_BREAK1, 0.080,  0.489),   # eq 4
-        (_MI_BREAK1, _MI_BREAK2, 0.187,  0.184),   # eq 5
-        (_MI_BREAK2, _MI_MAX,    0.107,  0.471),   # eq 6
+        (0.83, 2.85, 0.080,  0.489),   # eq 4
+        (2.85, 3.60, 0.187,  0.184),   # eq 5
+        (3.60, 7.20, 0.107,  0.471),   # eq 6
     ),
 }
 
@@ -145,6 +141,8 @@ class CummingsIFMR:
             raise ValueError(f"variant must be 'MIST' or 'PARSEC'; got {variant!r}")
         self.variant: IFMRVariant = variant
         self._segments = _IFMR_SEGMENTS[variant]
+        self._mi_min: float = self._segments[0][0]
+        self._mi_max: float = self._segments[-1][1]
 
     # ------------------------------------------------------------------
     def final_mass(self, mi: float) -> float:
@@ -159,10 +157,10 @@ class CummingsIFMR:
         Returns
         -------
         float
-            WD final mass in M_sun.  Returns ``nan`` if *mi* is outside
-            [``_MI_MIN``, ``_MI_MAX``].
+            WD final mass in M_sun.  Returns ``nan`` if *mi* is outside the
+            variant's Mi range (PARSEC: 0.87–8.20; MIST: 0.83–7.20).
         """
-        if not (_MI_MIN <= mi <= _MI_MAX):
+        if not (self._mi_min <= mi <= self._mi_max):
             return float("nan")
         for mi_lo, mi_hi, slope, intercept in self._segments:
             if mi_lo <= mi <= mi_hi:
