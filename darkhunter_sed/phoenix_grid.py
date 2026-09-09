@@ -1037,3 +1037,95 @@ def phoenix_synth_phot(
         systems=systems,
         bandpasses=bps,
     )
+
+
+def phoenix_synth_phot_2star(
+    grid: PhoenixGrid,
+    mist1: object,
+    mist2: object,
+    mh: float,
+    alpha: float,
+    a_v: float,
+    bands: Sequence[str],
+    *,
+    distance_pc: float,
+    systems: Sequence[str] = ("ab",),
+    bandpasses: Mapping[str, object] | None = None,
+    r_v: float = DEFAULT_R_V,
+) -> dict[str, dict[str, float]]:
+    """
+    2-star coeval Path-2 forward photometry: dilute both stars → sum → F99 → mags.
+
+    Parameters
+    ----------
+    grid :
+        :class:`PhoenixGrid` instance with photometry wavelengths set (or will
+        be set from ``bandpasses``).
+    mist1, mist2 :
+        :class:`~darkhunter_sed.misty_iso.MistPoint` for primary and secondary.
+        Each must expose ``teff_k``, ``logg``, and ``radius_cm``.
+    mh, alpha :
+        Shared metallicity ``[M/H]`` and alpha enhancement ``[α/Fe]``.
+    a_v :
+        Shared visual extinction (mag); applied **once** to the summed SED.
+    bands :
+        Registry band names.
+    distance_pc :
+        Shared heliocentric distance in pc (``> 0``).
+    systems, bandpasses, r_v :
+        Forwarded to :func:`synthesize_mags` / F99.
+
+    Returns
+    -------
+    dict
+        ``{band: {"ab": float}}`` (and "vega" if requested) for the combined SED.
+
+    Limits
+    ------
+    Path-2 multi-component order: dilute star 1 (no extinction) + dilute star 2
+    (no extinction) → **sum** on the bandpass-λ grid → F99 applied once to the
+    combined SED → synthesize mags.  The ``extincted_spectrum(a_v=0)`` fast path
+    avoids double extinction.  Both stars share the same ``mh``, ``alpha``, and
+    photometry wavelength grid.
+    """
+    from darkhunter_sed.filters_synphot import (
+        bandpass_wavelength_grid,
+        load_bandpass,
+    )
+
+    bps: Mapping[str, object]
+    if bandpasses is not None:
+        bps = bandpasses
+    else:
+        bps = {b: load_bandpass(b) for b in bands}
+    grid.set_photometry_wavelengths(bandpass_wavelength_grid(bps))
+
+    # Star 1: interpolate on photometry grid, dilute to Earth; a_v=0 is a no-op
+    # in apply_f99_extinction so this is efficient.
+    wave, flux1 = grid.extincted_spectrum(
+        float(mist1.teff_k),  # type: ignore[attr-defined]
+        float(mist1.logg),    # type: ignore[attr-defined]
+        float(mh),
+        float(alpha),
+        0.0,
+        radius_cm=float(mist1.radius_cm),    # type: ignore[attr-defined]
+        distance_pc=float(distance_pc),
+        r_v=r_v,
+    )
+    # Star 2: same grid, same distance, different atmosphere
+    _, flux2 = grid.extincted_spectrum(
+        float(mist2.teff_k),  # type: ignore[attr-defined]
+        float(mist2.logg),    # type: ignore[attr-defined]
+        float(mh),
+        float(alpha),
+        0.0,
+        radius_cm=float(mist2.radius_cm),    # type: ignore[attr-defined]
+        distance_pc=float(distance_pc),
+        r_v=r_v,
+    )
+    # Sum diluted spectra, then apply F99 once to the combined SED.
+    combined = flux1 + flux2
+    alav = grid._phot_alav_curve(r_v)
+    combined = apply_f99_extinction(wave, combined, float(a_v), r_v=r_v, alambda_over_av=alav)
+
+    return synthesize_mags(wave, combined, bands, systems=systems, bandpasses=bps)

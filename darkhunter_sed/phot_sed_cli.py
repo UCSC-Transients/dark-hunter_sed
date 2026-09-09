@@ -14,8 +14,10 @@ from darkhunter_sed.config import phot_sed_dir, photometry_dir
 from darkhunter_sed.misty_iso import load_misty_predictor, resolve_mist_nn_path
 from darkhunter_sed.phot_sed_fit import (
     OneStarPriorBounds,
+    TwoStarPriorBounds,
     load_bandpasses_for_bands,
     run_1star_fit,
+    run_2star_fit,
 )
 from darkhunter_sed.phot_sed_io import read_photometry_fits
 from darkhunter_sed.phoenix_grid import PhoenixGrid
@@ -30,8 +32,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--model",
         default="1star",
-        choices=("1star",),
-        help="SED model (only 1star in this release)",
+        choices=("1star", "2star"),
+        help="SED model: 1star (single star) or 2star (coeval binary; shared chem/Av/parallax)",
     )
     p.add_argument(
         "--phot",
@@ -157,9 +159,6 @@ def main(argv: list[str] | None = None) -> int:
     for production runs (unit tests inject mocks and do not call this path).
     """
     args = _build_parser().parse_args(argv)
-    if args.model != "1star":
-        print(f"Unsupported model: {args.model}", file=sys.stderr)
-        return 2
 
     gaia_id = _normalize_gaia_id(args.gaia_id)
     phot_path = (
@@ -190,14 +189,12 @@ def main(argv: list[str] | None = None) -> int:
     predictor = load_misty_predictor(mist_nn)
     grid = PhoenixGrid(root=args.phoenix_dir)
     bandpasses = load_bandpasses_for_bands([r.band for r in rows])
-
     out_dir = args.outdir if args.outdir is not None else phot_sed_dir()
-    result, paths = run_1star_fit(
-        rows,
+
+    common_kw: dict = dict(
         gaia_id=gaia_id,
         mist_predictor=predictor,
         phoenix_grid=grid,
-        bounds=OneStarPriorBounds(),
         out_dir=out_dir,
         nlive=int(args.nlive),
         dlogz=float(args.dlogz),
@@ -208,8 +205,17 @@ def main(argv: list[str] | None = None) -> int:
         nworkers=int(args.nworkers),
         bandpasses=bandpasses,
     )
+
+    if args.model == "1star":
+        result, paths = run_1star_fit(rows, bounds=OneStarPriorBounds(), **common_kw)
+    elif args.model == "2star":
+        result, paths = run_2star_fit(rows, bounds=TwoStarPriorBounds(), **common_kw)
+    else:
+        print(f"Unsupported model: {args.model}", file=sys.stderr)
+        return 2
+
     print(
-        f"1star fit gaia_id={gaia_id}  lnZ={result.logz:.3f}±{result.logz_err:.3f}  "
+        f"{args.model} fit gaia_id={gaia_id}  lnZ={result.logz:.3f}±{result.logz_err:.3f}  "
         f"BIC={result.bic:.3f}  lnL_max={result.ln_l_max:.3f}"
     )
     print(f"summary: {paths['summary_json']}")
