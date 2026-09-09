@@ -195,6 +195,40 @@ def _unit_cube_to_bounds(
     return lo + uu * (hi - lo)
 
 
+def load_bandpasses_for_bands(
+    bands: Sequence[str],
+    *,
+    cdbs_root: Path | str | None = None,
+) -> dict[str, object]:
+    """
+    Load synphot ``SpectralElement``s once for a set of Path-2 band names.
+
+    Parameters
+    ----------
+    bands :
+        Registry band names (duplicates ignored; order preserved by first seen).
+    cdbs_root :
+        Optional CDBS root for :func:`darkhunter_sed.filters_synphot.load_bandpass`.
+
+    Returns
+    -------
+    dict[str, object]
+        ``{band: SpectralElement}``.
+
+    Limits
+    ------
+    Raises on unknown bands. Call once per fit and pass into the likelihood.
+    """
+    from darkhunter_sed.filters_synphot import load_bandpass
+
+    out: dict[str, object] = {}
+    for band in bands:
+        if band in out:
+            continue
+        out[band] = load_bandpass(band, cdbs_root=cdbs_root)
+    return out
+
+
 def fit_1star_dynesty(
     rows: Sequence[PhotRow],
     *,
@@ -225,7 +259,9 @@ def fit_1star_dynesty(
     nlive, maxiter, seed, dlogz :
         Dynesty controls. ``maxiter`` stops early (useful in tests).
     bandpasses, mag_system :
-        Photometry system / injectable thruputs.
+        Photometry system / injectable thruputs. When ``bandpasses`` is
+        ``None`` and a real ``phoenix_grid`` path is used, bandpasses are
+        loaded once via :func:`load_bandpasses_for_bands`.
 
     Returns
     -------
@@ -235,7 +271,8 @@ def fit_1star_dynesty(
     Limits
     ------
     Uniform priors only (Path-2 ``phot_sed_priors`` not wired yet). Failed
-    forward-model evaluations return ``-inf`` likelihood.
+    forward-model evaluations return ``-inf`` likelihood. Fit path uses AB
+    magnitudes only (``systems=("ab",)``).
     """
     from dynesty import NestedSampler
 
@@ -245,6 +282,10 @@ def fit_1star_dynesty(
     bound_list = prior.as_list()
     bands = [r.band for r in rows]
     ndim = len(ONE_STAR_PARAM_NAMES)
+
+    bps = bandpasses
+    if bps is None and synth_phot is None:
+        bps = load_bandpasses_for_bands(bands)
 
     def prior_transform(u: NDArray[np.floating]) -> NDArray[np.float64]:
         return _unit_cube_to_bounds(u, bound_list)
@@ -257,7 +298,8 @@ def fit_1star_dynesty(
                 mist_predictor=mist_predictor,
                 phoenix_grid=phoenix_grid,
                 synth_phot=synth_phot,
-                bandpasses=bandpasses,
+                systems=("ab",),
+                bandpasses=bps,
                 mag_system=mag_system,
             )
         except Exception:
@@ -419,13 +461,17 @@ def run_1star_fit(
         bandpasses=bandpasses,
     )
     bands = [r.band for r in rows]
+    bps = bandpasses
+    if bps is None and synth_phot is None:
+        bps = load_bandpasses_for_bands(bands)
     best_pred = predict_1star_phot(
         result.best_theta,
         bands,
         mist_predictor=mist_predictor,
         phoenix_grid=phoenix_grid,
         synth_phot=synth_phot,
-        bandpasses=bandpasses,
+        systems=("ab",),
+        bandpasses=bps,
     )
     paths = write_1star_outputs(
         result, gaia_id=gaia_id, out_dir=out_dir, best_pred=best_pred

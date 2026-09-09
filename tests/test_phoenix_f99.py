@@ -199,6 +199,78 @@ def test_synthesize_mags_ab_vega_keys() -> None:
     assert np.isfinite(out["X"]["ab"]) and np.isfinite(out["X"]["vega"])
 
 
+def test_abmag_matches_synphot_observation() -> None:
+    """Photon-weighted numpy AB matches synphot Observation on a short grid."""
+    from synphot import Observation, SourceSpectrum
+    from synphot.models import Empirical1D
+    from synphot.units import FLAM
+
+    from darkhunter_sed.phoenix_grid import _abmag_from_flam_on_bandpass
+
+    wave = _tiny_wave()
+    flux = np.full_like(wave, 1.0e-14)
+    bp = _flat_bp(wave, "X")
+    thru = np.asarray(bp(bp.waveset).value, dtype=np.float64)
+    wave_bp = np.asarray(bp.waveset.to(u.AA).value, dtype=np.float64)
+    m_np = _abmag_from_flam_on_bandpass(wave, flux, wave_bp, thru)
+    src = SourceSpectrum(Empirical1D, points=wave * u.AA, lookup_table=flux * FLAM)
+    m_sp = float(Observation(src, bp, force="taper").effstim("abmag").value)
+    assert m_np == pytest.approx(m_sp, abs=1e-4)
+
+
+def test_synthesize_mags_bandpass_native_fast_on_long_wave() -> None:
+    """Full-HiRes-length array must not make synth take seconds (bandpass-native)."""
+    import time
+
+    wave = np.linspace(3000.0, 11000.0, 200_000, dtype=np.float64)
+    flux = np.full_like(wave, 1.0e-14)
+    bp_wave = np.linspace(4800.0, 5800.0, 200, dtype=np.float64)
+    bp = _flat_bp(bp_wave, "g")
+    t0 = time.perf_counter()
+    out = synthesize_mags(wave, flux, ["g"], systems=("ab",), bandpasses={"g": bp})
+    dt = time.perf_counter() - t0
+    assert np.isfinite(out["g"]["ab"])
+    assert dt < 2.0, f"bandpass-native synth too slow: {dt:.2f}s"
+
+
+def test_phoenix_flux_lru_cache() -> None:
+    wave = _tiny_wave()
+    path_a = Path("/mock/cache_a.fits")
+    path_b = Path("/mock/cache_b.fits")
+    path_c = Path("/mock/cache_c.fits")
+    path_d = Path("/mock/cache_d.fits")
+    loads: list[Path] = []
+    fluxes = {
+        path_a: np.ones_like(wave),
+        path_b: np.ones_like(wave) * 2,
+        path_c: np.ones_like(wave) * 3,
+        path_d: np.ones_like(wave) * 4,
+    }
+
+    def loader(p: Path) -> np.ndarray:
+        loads.append(p)
+        return fluxes[p]
+
+    pts = [
+        PhoenixPoint(5000.0, 4.5, 0.0, 0.0, path_a),
+        PhoenixPoint(5200.0, 4.5, 0.0, 0.0, path_b),
+        PhoenixPoint(5000.0, 4.0, 0.0, 0.0, path_c),
+        PhoenixPoint(5200.0, 4.0, 0.0, 0.0, path_d),
+    ]
+    grid = PhoenixGrid(
+        wavelength=wave,
+        points=pts,
+        flux_loader=loader,
+        to_flam=False,
+        flux_cache_size=8,
+    )
+    grid.spectrum(5100.0, 4.25, 0.0, 0.0, interpolate=True)
+    n_after_first = len(loads)
+    assert n_after_first == 4
+    grid.spectrum(5100.0, 4.25, 0.0, 0.0, interpolate=True)
+    assert len(loads) == n_after_first  # corners served from LRU
+
+
 def test_scale_surface_to_earth() -> None:
     flux = np.array([1.0, 2.0])
     # R = d → geometric factor 1

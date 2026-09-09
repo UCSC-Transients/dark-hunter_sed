@@ -42,7 +42,7 @@ $PY -m darkhunter_sed.filters_synphot
 
 ### Path-2 PHOENIX + F99 (R_V=3.1)
 
-`darkhunter_sed.phoenix_grid.PhoenixGrid` indexes `$PHOENIX_DIR` and interpolates Teff / logg / [Fe/H] / [α/Fe] when Alpha dirs exist. `darkhunter_sed.extinction_f99` reddens with `dust_extinction` Fitzpatrick99 (`F99.extinguish`, R_V=3.1) before synphot AB/Vega magnitudes. Unit tests use a mocked tiny wavelength grid (no full HiRes tree in CI).
+`darkhunter_sed.phoenix_grid.PhoenixGrid` indexes `$PHOENIX_DIR` and interpolates Teff / logg / [Fe/H] / [α/Fe] when Alpha dirs exist. SED order: dilute → (sum components) → `extinction_f99` F99 R_V=3.1 → bandpass-native `synthesize_mags` (interp onto filter wavesets; do not feed full HiRes into synphot). Unit tests use a mocked tiny wavelength grid (no full HiRes tree in CI).
 
 ### Path-2 MISTy + 1-star dynesty
 

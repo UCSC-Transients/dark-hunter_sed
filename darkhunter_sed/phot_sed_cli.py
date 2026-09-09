@@ -12,7 +12,7 @@ from pathlib import Path
 
 from darkhunter_sed.config import phot_sed_dir, photometry_dir
 from darkhunter_sed.misty_iso import load_misty_predictor, resolve_mist_nn_path
-from darkhunter_sed.phot_sed_fit import OneStarPriorBounds, run_1star_fit
+from darkhunter_sed.phot_sed_fit import OneStarPriorBounds, load_bandpasses_for_bands, run_1star_fit
 from darkhunter_sed.phot_sed_io import read_photometry_fits
 from darkhunter_sed.phoenix_grid import PhoenixGrid
 
@@ -154,6 +154,7 @@ def main(argv: list[str] | None = None) -> int:
     mist_nn = resolve_mist_nn_path(args.mist_nn)
     predictor = load_misty_predictor(mist_nn)
     grid = PhoenixGrid(root=args.phoenix_dir)
+    bandpasses = load_bandpasses_for_bands([r.band for r in rows])
 
     out_dir = args.outdir if args.outdir is not None else phot_sed_dir()
     result, paths = run_1star_fit(
@@ -166,6 +167,7 @@ def main(argv: list[str] | None = None) -> int:
         nlive=int(args.nlive),
         maxiter=args.maxiter,
         seed=int(args.seed),
+        bandpasses=bandpasses,
     )
     print(
         f"1star fit gaia_id={gaia_id}  lnZ={result.logz:.3f}±{result.logz_err:.3f}  "
