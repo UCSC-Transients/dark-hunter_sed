@@ -273,6 +273,10 @@ def query_catalogs(source_id, radius=3, ps1_vizier_epoch_jyear=PS1_VIZIER_DEFAUL
     job = Gaia.launch_job(
         f"""
         SELECT TOP 10 ra, dec, ref_epoch, pmra, pmdec,
+               parallax, parallax_error,
+               teff_gspphot, teff_gspphot_lower, teff_gspphot_upper,
+               logg_gspphot, logg_gspphot_lower, logg_gspphot_upper,
+               mh_gspphot, mh_gspphot_lower, mh_gspphot_upper,
                phot_g_mean_mag, phot_g_mean_flux, phot_g_mean_flux_error,
                phot_bp_mean_mag, phot_bp_mean_flux, phot_bp_mean_flux_error,
                phot_rp_mean_mag, phot_rp_mean_flux, phot_rp_mean_flux_error
@@ -302,6 +306,25 @@ def query_catalogs(source_id, radius=3, ps1_vizier_epoch_jyear=PS1_VIZIER_DEFAUL
     )
     ps_join = job_ps.get_results()
     row_ps1 = ps_join[0] if len(ps_join) else None
+
+    plx = _gaia_scalar(row0, "parallax")
+    plx_err = _gaia_scalar(row0, "parallax_error")
+    if math.isfinite(plx) and math.isfinite(plx_err) and plx_err > 0 and plx > 0:
+        photometry.append(("Gaia_parallax", plx, plx_err))
+
+    # Gaia GSP-Phot astrophysical parameters as Gaussian constraint rows.
+    for band_name, col, col_lo, col_hi in (
+        ("Gaia_Teff", "teff_gspphot", "teff_gspphot_lower", "teff_gspphot_upper"),
+        ("Gaia_logg", "logg_gspphot", "logg_gspphot_lower", "logg_gspphot_upper"),
+        ("Gaia_MH", "mh_gspphot", "mh_gspphot_lower", "mh_gspphot_upper"),
+    ):
+        val = _gaia_scalar(row0, col)
+        lo = _gaia_scalar(row0, col_lo)
+        hi = _gaia_scalar(row0, col_hi)
+        if math.isfinite(val) and math.isfinite(lo) and math.isfinite(hi):
+            err = max(val - lo, hi - val)
+            if err > 0:
+                photometry.append((band_name, val, err))
 
     photometry.append(
         (
