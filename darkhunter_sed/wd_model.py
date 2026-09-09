@@ -142,6 +142,11 @@ class WDFitResult:
         WD mass (M_sun) for each sample.
     m_i_samples :
         Progenitor initial mass (M_sun) for each sample; nan for out-of-IFMR.
+    m_i_unc_ifmr_samples :
+        1-σ IFMR systematic uncertainty on Mi for each sample (M_sun).
+        Propagated from Cummings+2018 coefficient uncertainties:
+        σ_Mi = (1/slope) √[(σ_slope × Mi)² + σ_intercept²].
+        nan where Mi is outside the IFMR range.
     extrap_mask :
         Boolean array; True where M_WD > 1.3 M_sun or logg > 9.0.
     """
@@ -153,6 +158,7 @@ class WDFitResult:
     weights: NDArray[np.float64]
     m_wd_samples: NDArray[np.float64]
     m_i_samples: NDArray[np.float64]
+    m_i_unc_ifmr_samples: NDArray[np.float64]
     extrap_mask: NDArray[np.bool_]
 
     def summary(self) -> dict[str, Any]:
@@ -169,8 +175,16 @@ class WDFitResult:
         m_wd_lo  = _quantile(m_wd, 0.16)
         m_wd_hi  = _quantile(m_wd, 0.84)
 
-        mi_valid = self.m_i_samples[~np.isnan(self.m_i_samples)]
-        m_i_med = float(np.median(mi_valid)) if len(mi_valid) else float("nan")
+        mi_arr = self.m_i_samples
+        unc_arr = self.m_i_unc_ifmr_samples
+        valid = ~np.isnan(mi_arr)
+        m_i_med = float(np.median(mi_arr[valid])) if valid.any() else float("nan")
+
+        # Weighted-median IFMR systematic on Mi across valid samples.
+        valid_unc = valid & ~np.isnan(unc_arr)
+        m_i_ifmr_unc_med = (
+            float(np.median(unc_arr[valid_unc])) if valid_unc.any() else float("nan")
+        )
 
         extrap_frac = float(np.sum(self.extrap_mask * w))
 
@@ -185,6 +199,7 @@ class WDFitResult:
             "m_wd_lo": m_wd_lo,
             "m_wd_hi": m_wd_hi,
             "m_i_median": m_i_med,
+            "m_i_ifmr_unc_median": m_i_ifmr_unc_med,
             "extrap_mass_frac": extrap_frac,
             "extrap_mass": bool(extrap_frac > 0.01),
             "teff_median": _par_median(0),
@@ -355,20 +370,23 @@ def run_wd_fit(
             weights = np.exp(dres.logwt - dres.logz[-1])
             logevidence = float(dres.logz[-1])
 
-            # Derive M_WD and M_i for each posterior sample.
+            # Derive M_WD, M_i, and IFMR systematic σ_Mi for each posterior sample.
             n_samples = len(samples)
-            m_wd_arr   = np.empty(n_samples)
-            m_i_arr    = np.empty(n_samples)
-            extrap_arr = np.zeros(n_samples, dtype=bool)
+            m_wd_arr     = np.empty(n_samples)
+            m_i_arr      = np.full(n_samples, float("nan"))
+            m_i_unc_arr  = np.full(n_samples, float("nan"))
+            extrap_arr   = np.zeros(n_samples, dtype=bool)
 
             for j in range(n_samples):
                 teff, logg, av, plx = samples[j]
                 dist_pc = 1000.0 / max(plx, 1e-6)
                 sr = grid.synth_phot(teff, logg, av, dist_pc, bands=None)
                 mw = sr["m_wd"]
-                m_wd_arr[j]   = mw
-                m_i_arr[j]    = ifmr.initial_mass(mw)
-                extrap_arr[j] = sr["extrap_mass"]
+                m_wd_arr[j]    = mw
+                mi, sigma_mi   = ifmr.initial_mass_unc(mw)
+                m_i_arr[j]     = mi
+                m_i_unc_arr[j] = sigma_mi
+                extrap_arr[j]  = sr["extrap_mass"]
 
             result = WDFitResult(
                 atm_type=atm,
@@ -378,6 +396,7 @@ def run_wd_fit(
                 weights=weights,
                 m_wd_samples=m_wd_arr,
                 m_i_samples=m_i_arr,
+                m_i_unc_ifmr_samples=m_i_unc_arr,
                 extrap_mask=extrap_arr,
             )
             results.append(result)
@@ -391,6 +410,7 @@ def run_wd_fit(
                     weights=weights,
                     m_wd=m_wd_arr,
                     m_i=m_i_arr,
+                    m_i_unc_ifmr=m_i_unc_arr,
                 )
                 summ = result.summary()
                 (outdir / f"{stem}_summary.json").write_text(

@@ -209,6 +209,37 @@ class TestCummingsIFMR:
         assert math.isnan(ifmr.final_mass(100.0))  # above both Mi_MAX values
 
     @pytest.mark.parametrize("variant", ["MIST", "PARSEC"])
+    def test_final_mass_unc_positive(self, variant: str) -> None:
+        ifmr = CummingsIFMR(variant)  # type: ignore[arg-type]
+        for mi in [1.5, 2.0, 4.0, 6.0]:
+            unc = ifmr.final_mass_unc(mi)
+            if not math.isnan(unc):
+                assert unc > 0.0
+
+    @pytest.mark.parametrize("variant", ["MIST", "PARSEC"])
+    def test_final_mass_unc_outside_range_nan(self, variant: str) -> None:
+        ifmr = CummingsIFMR(variant)  # type: ignore[arg-type]
+        assert math.isnan(ifmr.final_mass_unc(0.1))
+        assert math.isnan(ifmr.final_mass_unc(99.0))
+
+    @pytest.mark.parametrize("variant", ["MIST", "PARSEC"])
+    def test_initial_mass_unc_structure(self, variant: str) -> None:
+        ifmr = CummingsIFMR(variant)  # type: ignore[arg-type]
+        mf = ifmr.final_mass(2.0)
+        mi, sigma_mi = ifmr.initial_mass_unc(mf)
+        assert not math.isnan(mi)
+        assert sigma_mi > 0.0
+        # σ_Mi should scale with 1/slope — verify it's in a plausible range (< 1 M_sun).
+        assert sigma_mi < 1.0
+
+    @pytest.mark.parametrize("variant", ["MIST", "PARSEC"])
+    def test_initial_mass_unc_outside_range(self, variant: str) -> None:
+        ifmr = CummingsIFMR(variant)  # type: ignore[arg-type]
+        mi, sigma_mi = ifmr.initial_mass_unc(0.01)  # below any segment's Mf range
+        assert math.isnan(mi)
+        assert math.isnan(sigma_mi)
+
+    @pytest.mark.parametrize("variant", ["MIST", "PARSEC"])
     def test_round_trip(self, variant: str) -> None:
         ifmr = CummingsIFMR(variant)  # type: ignore[arg-type]
         for mi in [1.5, 2.5, 3.0, 4.0, 6.0]:
@@ -323,7 +354,8 @@ class TestWDModelSmoke:
         required = {
             "atm_type", "ifmr", "logevidence",
             "m_wd_median", "m_wd_lo", "m_wd_hi",
-            "m_i_median", "extrap_mass_frac", "extrap_mass",
+            "m_i_median", "m_i_ifmr_unc_median",
+            "extrap_mass_frac", "extrap_mass",
             "teff_median", "logg_median", "av_median", "parallax_median",
         }
         assert required <= s.keys()
