@@ -12,7 +12,11 @@ from pathlib import Path
 
 from darkhunter_sed.config import phot_sed_dir, photometry_dir
 from darkhunter_sed.misty_iso import load_misty_predictor, resolve_mist_nn_path
-from darkhunter_sed.phot_sed_fit import OneStarPriorBounds, load_bandpasses_for_bands, run_1star_fit
+from darkhunter_sed.phot_sed_fit import (
+    OneStarPriorBounds,
+    load_bandpasses_for_bands,
+    run_1star_fit,
+)
 from darkhunter_sed.phot_sed_io import read_photometry_fits
 from darkhunter_sed.phoenix_grid import PhoenixGrid
 
@@ -41,7 +45,18 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Output directory (default: output/phot_sed/)",
     )
-    p.add_argument("--nlive", type=int, default=200, help="dynesty live points")
+    p.add_argument(
+        "--nlive",
+        type=int,
+        default=100,
+        help="dynesty live points (default 100; increase for tighter evidence)",
+    )
+    p.add_argument(
+        "--dlogz",
+        type=float,
+        default=1.0,
+        help="dynesty stopping criterion dlogZ (default 1.0; tighten to 0.5 for precise lnZ)",
+    )
     p.add_argument(
         "--maxiter",
         type=int,
@@ -49,6 +64,26 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Optional dynesty maxiter (tests / quick runs)",
     )
     p.add_argument("--seed", type=int, default=42, help="RNG seed for dynesty")
+    p.add_argument(
+        "--sample",
+        default="auto",
+        help="dynesty proposal method: auto, unif, rwalk, rslice, hslice (default auto)",
+    )
+    p.add_argument(
+        "--bound",
+        default="multi",
+        help="dynesty bounding method: multi, single, balls, cubes, none (default multi)",
+    )
+    p.add_argument(
+        "--nworkers",
+        type=int,
+        default=1,
+        help=(
+            "Parallel worker processes for likelihood evaluations (default 1 = serial). "
+            "Workers > 1 spawn a multiprocessing.Pool; each re-initialises MISTy+PHOENIX "
+            "so benchmark before enabling on short fits."
+        ),
+    )
     p.add_argument(
         "--mist-nn",
         type=Path,
@@ -165,8 +200,12 @@ def main(argv: list[str] | None = None) -> int:
         bounds=OneStarPriorBounds(),
         out_dir=out_dir,
         nlive=int(args.nlive),
+        dlogz=float(args.dlogz),
         maxiter=args.maxiter,
         seed=int(args.seed),
+        sample=args.sample,
+        bound=args.bound,
+        nworkers=int(args.nworkers),
         bandpasses=bandpasses,
     )
     print(

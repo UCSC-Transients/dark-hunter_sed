@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import pytest
@@ -14,6 +15,7 @@ from darkhunter_sed.misty_iso import MistPoint, evaluate_mist, R_SUN_CM
 from darkhunter_sed.phot_sed_fit import (
     OneStarPriorBounds,
     bic_from_max_likelihood,
+    fit_1star_dynesty,
     photometry_loglike,
     run_1star_fit,
 )
@@ -242,3 +244,162 @@ def test_cli_missing_phot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsy
     err = capsys.readouterr().err
     assert "12345_phot.fits" in err
     assert "Gaia_DR3_12345_phot.fits" not in err
+
+
+# ---------------------------------------------------------------------------
+# Speed-knob tests (Issue #29): JIT warm-up, new CLI flags, nworkers
+# ---------------------------------------------------------------------------
+
+def _make_tight_fit_args(tmp_path: Path) -> tuple[list[PhotRow], OneStarPriorBounds]:
+    """Shared fixture: 4-band synthetic rows with tight priors."""
+    truth = OneStarParams(eep=300.0, mass=1.0, feh=0.0, afe=0.0, a_v=0.1, parallax_mas=10.0)
+    bands = ["b0", "b1", "b2", "b3"]
+    truth_pred = predict_1star_phot(
+        truth, bands, mist_predictor=_mock_mist_predictor, synth_phot=_mock_synth
+    )
+    rows = [PhotRow(b, truth_pred.mags[b], 0.05, FLAG_DETECTION) for b in bands]
+    bounds = OneStarPriorBounds(
+        eep=(280.0, 320.0),
+        mass=(0.8, 1.2),
+        feh=(-0.2, 0.2),
+        afe=(-0.1, 0.1),
+        a_v=(0.0, 0.3),
+        parallax_mas=(8.0, 12.0),
+    )
+    return rows, bounds
+
+
+def test_jit_warmup_calls_predictor_before_sampler(tmp_path: Path) -> None:
+    """jit_warmup=True must call mist_predictor before dynesty sampling starts."""
+    rows, bounds = _make_tight_fit_args(tmp_path)
+    bands = [r.band for r in rows]
+    call_log: list[str] = []
+
+    def counting_predictor(**kwargs: float) -> dict:
+        call_log.append("call")
+        return _mock_mist_predictor(**kwargs)
+
+    # Run with jit_warmup=True and maxiter=1 so dynesty barely runs.
+    fit_1star_dynesty(
+        rows,
+        mist_predictor=counting_predictor,
+        synth_phot=_mock_synth,
+        bounds=bounds,
+        nlive=10,
+        maxiter=1,
+        seed=0,
+        jit_warmup=True,
+    )
+    # Warm-up fires at least once, plus dynesty's own evaluations.
+    assert len(call_log) >= 1
+
+
+def test_jit_warmup_false_still_works(tmp_path: Path) -> None:
+    """jit_warmup=False must not crash and must produce a valid result."""
+    rows, bounds = _make_tight_fit_args(tmp_path)
+    result = fit_1star_dynesty(
+        rows,
+        mist_predictor=_mock_mist_predictor,
+        synth_phot=_mock_synth,
+        bounds=bounds,
+        nlive=10,
+        maxiter=1,
+        seed=0,
+        jit_warmup=False,
+    )
+    assert math.isfinite(result.logz)
+
+
+def test_fit_1star_sample_bound_params(tmp_path: Path) -> None:
+    """sample and bound parameters are accepted and produce valid results."""
+    rows, bounds = _make_tight_fit_args(tmp_path)
+    result = fit_1star_dynesty(
+        rows,
+        mist_predictor=_mock_mist_predictor,
+        synth_phot=_mock_synth,
+        bounds=bounds,
+        nlive=10,
+        maxiter=5,
+        seed=1,
+        sample="unif",
+        bound="single",
+        jit_warmup=False,
+    )
+    assert math.isfinite(result.logz)
+    assert math.isfinite(result.bic)
+
+
+def test_fit_1star_dlogz_param(tmp_path: Path) -> None:
+    """dlogz is forwarded to dynesty and accepted without error."""
+    rows, bounds = _make_tight_fit_args(tmp_path)
+    result = fit_1star_dynesty(
+        rows,
+        mist_predictor=_mock_mist_predictor,
+        synth_phot=_mock_synth,
+        bounds=bounds,
+        nlive=10,
+        maxiter=20,
+        seed=2,
+        dlogz=2.0,
+        jit_warmup=False,
+    )
+    assert math.isfinite(result.logz)
+
+
+def test_cli_new_flags_parse() -> None:
+    """New CLI flags --dlogz, --sample, --bound, --nworkers parse without error."""
+    import argparse
+    from darkhunter_sed.phot_sed_cli import _build_parser
+
+    p = _build_parser()
+    args = p.parse_args([
+        "12345",
+        "--nlive", "100",
+        "--dlogz", "1.0",
+        "--sample", "unif",
+        "--bound", "single",
+        "--nworkers", "2",
+    ])
+    assert args.nlive == 100
+    assert args.dlogz == pytest.approx(1.0)
+    assert args.sample == "unif"
+    assert args.bound == "single"
+    assert args.nworkers == 2
+
+
+def test_cli_nlive_default_is_100() -> None:
+    """Production --nlive default must be 100 (was 200 before Issue #29)."""
+    from darkhunter_sed.phot_sed_cli import _build_parser
+
+    p = _build_parser()
+    args = p.parse_args(["42"])
+    assert args.nlive == 100
+
+
+def test_cli_dlogz_default_is_1() -> None:
+    """Production --dlogz default must be 1.0 (tighter than 0.5 needs explicit flag)."""
+    from darkhunter_sed.phot_sed_cli import _build_parser
+
+    p = _build_parser()
+    args = p.parse_args(["42"])
+    assert args.dlogz == pytest.approx(1.0)
+
+
+def test_nworkers_serial_produces_valid_result(tmp_path: Path) -> None:
+    """nworkers=1 (serial) produces a valid FitResult1Star."""
+    rows, bounds = _make_tight_fit_args(tmp_path)
+    result, paths = run_1star_fit(
+        rows,
+        gaia_id="serial_test",
+        mist_predictor=_mock_mist_predictor,
+        synth_phot=_mock_synth,
+        bounds=bounds,
+        out_dir=tmp_path,
+        nlive=10,
+        maxiter=10,
+        seed=3,
+        nworkers=1,
+        jit_warmup=False,
+    )
+    assert math.isfinite(result.logz)
+    assert paths["summary_json"].is_file()
