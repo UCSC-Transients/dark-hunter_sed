@@ -241,7 +241,11 @@ def fit_1star_dynesty(
     seed: int | None = 42,
     bandpasses: Mapping[str, object] | None = None,
     mag_system: str = "ab",
-    dlogz: float = 0.5,
+    dlogz: float = 1.0,
+    sample: str = "auto",
+    bound: str = "multi",
+    nworkers: int = 1,
+    jit_warmup: bool = True,
 ) -> FitResult1Star:
     """
     Run dynesty nested sampling on the 1-star Path-2 model.
@@ -258,6 +262,24 @@ def fit_1star_dynesty(
         Uniform prior bounds; defaults are minimal Issue-4 uniforms.
     nlive, maxiter, seed, dlogz :
         Dynesty controls. ``maxiter`` stops early (useful in tests).
+        ``dlogz`` default 1.0 is appropriate for quick production fits;
+        tighten to 0.5 or lower for precise evidence comparison.
+    sample :
+        Dynesty proposal method (``'auto'``, ``'unif'``, ``'rwalk'``,
+        ``'rslice'``, etc.). ``'auto'`` selects ``'unif'`` for ndim < 10.
+    bound :
+        Dynesty bounding method (``'multi'``, ``'single'``, etc.).
+        ``'single'`` is faster for unimodal 6-D posteriors.
+    nworkers :
+        Number of parallel worker processes for likelihood evaluations
+        (default 1 = serial). Values > 1 spawn a ``multiprocessing.Pool``.
+        Each worker independently initialises MISTy + PHOENIX; for short
+        fits the startup cost can outweigh the gain — benchmark first.
+    jit_warmup :
+        If ``True`` (default), call ``mist_predictor`` once with a nominal
+        point before constructing the ``NestedSampler``.  This forces JAX
+        JIT compilation to happen outside the dynesty timing, saving
+        10–30 s on the first live-point evaluation.
     bandpasses, mag_system :
         Photometry system / injectable thruputs. When ``bandpasses`` is
         ``None`` and a real ``phoenix_grid`` path is used, bandpasses are
@@ -275,7 +297,12 @@ def fit_1star_dynesty(
     Uniform priors only (Path-2 ``phot_sed_priors`` not wired yet). Failed
     forward-model evaluations return ``-inf`` likelihood. Fit path uses AB
     magnitudes only (``systems=("ab",)``).
+    ``nworkers > 1`` requires the likelihood closure to be picklable;
+    JAX JIT functions satisfy this on recent JAX releases but Phoenix grid
+    initialisation happens once per worker process.
     """
+    import multiprocessing
+
     from dynesty import NestedSampler
 
     if not rows:
@@ -292,6 +319,26 @@ def fit_1star_dynesty(
         from darkhunter_sed.filters_synphot import bandpass_wavelength_grid
 
         phoenix_grid.set_photometry_wavelengths(bandpass_wavelength_grid(bps))
+
+    # Warm up JAX JIT before dynesty allocates live points.  The first call
+    # to a jax.jit-wrapped function triggers trace+compile (~10-30 s for
+    # MISTy LinNet); firing it here keeps that cost outside the sampler.
+    if jit_warmup:
+        _warmup_bounds = prior.as_list()
+        _mid = np.array([0.5 * (lo + hi) for lo, hi in _warmup_bounds], dtype=np.float64)
+        try:
+            predict_1star_phot(
+                _mid,
+                bands,
+                mist_predictor=mist_predictor,
+                phoenix_grid=phoenix_grid,
+                synth_phot=synth_phot,
+                systems=("ab",),
+                bandpasses=bps,
+                mag_system=mag_system,
+            )
+        except Exception:
+            pass
 
     def prior_transform(u: NDArray[np.floating]) -> NDArray[np.float64]:
         return _unit_cube_to_bounds(u, bound_list)
@@ -312,17 +359,32 @@ def fit_1star_dynesty(
             return -np.inf
         return photometry_loglike(pred.mags, rows)
 
-    sampler = NestedSampler(
-        loglike,
-        prior_transform,
-        ndim,
-        nlive=int(nlive),
-        rstate=np.random.default_rng(seed) if seed is not None else None,
-    )
-    run_kw: dict[str, Any] = {"print_progress": False, "dlogz": float(dlogz)}
-    if maxiter is not None:
-        run_kw["maxiter"] = int(maxiter)
-    sampler.run_nested(**run_kw)
+    pool: Any = None
+    queue_size: int | None = None
+    if nworkers > 1:
+        pool = multiprocessing.Pool(int(nworkers))
+        queue_size = int(nworkers)
+
+    try:
+        sampler = NestedSampler(
+            loglike,
+            prior_transform,
+            ndim,
+            nlive=int(nlive),
+            sample=sample,
+            bound=bound,
+            rstate=np.random.default_rng(seed) if seed is not None else None,
+            pool=pool,
+            queue_size=queue_size,
+        )
+        run_kw: dict[str, Any] = {"print_progress": False, "dlogz": float(dlogz)}
+        if maxiter is not None:
+            run_kw["maxiter"] = int(maxiter)
+        sampler.run_nested(**run_kw)
+    finally:
+        if pool is not None:
+            pool.terminate()
+            pool.join()
     res = sampler.results
 
     logl = np.asarray(res.logl, dtype=np.float64)
@@ -449,11 +511,21 @@ def run_1star_fit(
     maxiter: int | None = None,
     seed: int | None = 42,
     bandpasses: Mapping[str, object] | None = None,
+    dlogz: float = 1.0,
+    sample: str = "auto",
+    bound: str = "multi",
+    nworkers: int = 1,
+    jit_warmup: bool = True,
 ) -> tuple[FitResult1Star, dict[str, Path]]:
     """
     Fit 1-star + write ``output/phot_sed/`` products.
 
-    See :func:`fit_1star_dynesty` and :func:`write_1star_outputs`.
+    Parameters
+    ----------
+    dlogz, sample, bound, nworkers, jit_warmup :
+        Forwarded to :func:`fit_1star_dynesty`; see that function for details.
+
+    See also :func:`fit_1star_dynesty` and :func:`write_1star_outputs`.
     """
     result = fit_1star_dynesty(
         rows,
@@ -465,6 +537,11 @@ def run_1star_fit(
         maxiter=maxiter,
         seed=seed,
         bandpasses=bandpasses,
+        dlogz=dlogz,
+        sample=sample,
+        bound=bound,
+        nworkers=nworkers,
+        jit_warmup=jit_warmup,
     )
     bands = [r.band for r in rows]
     bps = bandpasses
