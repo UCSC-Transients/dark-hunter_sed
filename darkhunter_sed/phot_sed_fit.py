@@ -261,7 +261,9 @@ def fit_1star_dynesty(
     bandpasses, mag_system :
         Photometry system / injectable thruputs. When ``bandpasses`` is
         ``None`` and a real ``phoenix_grid`` path is used, bandpasses are
-        loaded once via :func:`load_bandpasses_for_bands`.
+        loaded once via :func:`load_bandpasses_for_bands`. When a
+        ``phoenix_grid`` is used, its photometry λ grid is set once from the
+        bandpass waveset union (Issue #26).
 
     Returns
     -------
@@ -286,6 +288,10 @@ def fit_1star_dynesty(
     bps = bandpasses
     if bps is None and synth_phot is None:
         bps = load_bandpasses_for_bands(bands)
+    if phoenix_grid is not None and bps is not None:
+        from darkhunter_sed.filters_synphot import bandpass_wavelength_grid
+
+        phoenix_grid.set_photometry_wavelengths(bandpass_wavelength_grid(bps))
 
     def prior_transform(u: NDArray[np.floating]) -> NDArray[np.float64]:
         return _unit_cube_to_bounds(u, bound_list)

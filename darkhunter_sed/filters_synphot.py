@@ -573,6 +573,41 @@ def load_bandpass(band: str, *, cdbs_root: Path | str | None = None):
     return SpectralElement.from_file(str(path))
 
 
+def bandpass_wavelength_grid(
+    bandpasses: Mapping[str, object],
+) -> NDArray[np.float64]:
+    """
+    Sorted unique union of bandpass ``waveset`` wavelengths (Å).
+
+    Parameters
+    ----------
+    bandpasses :
+        Mapping ``band → synphot.SpectralElement`` (or any object with a
+        ``waveset`` Quantity attribute).
+
+    Returns
+    -------
+    NDArray[np.float64]
+        Strictly increasing wavelengths in Angstroms.
+
+    Limits
+    ------
+    Path-2 photometry SED evaluation uses this grid instead of full PHOENIX
+    HiRes (~1.57M λ). Empty maps and bandpasses without a usable waveset raise.
+    """
+    from astropy import units as u
+
+    if not bandpasses:
+        raise ValueError("bandpasses must be non-empty")
+    chunks: list[NDArray[np.float64]] = []
+    for name, bp in bandpasses.items():
+        waves = getattr(bp, "waveset", None)
+        if waves is None or len(waves) < 2:
+            raise ValueError(f"Bandpass {name} has no usable waveset")
+        chunks.append(np.asarray(waves.to(u.AA).value, dtype=np.float64))
+    return np.unique(np.concatenate(chunks))
+
+
 def registered_bands(*, converted_only: bool = False) -> tuple[str, ...]:
     """
     List registry band names.

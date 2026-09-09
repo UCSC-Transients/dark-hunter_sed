@@ -92,6 +92,7 @@ def apply_f99_extinction(
     a_v: float,
     *,
     r_v: float = DEFAULT_R_V,
+    alambda_over_av: NDArray[np.floating] | None = None,
 ) -> NDArray[np.float64]:
     """
     Redden a spectrum with Fitzpatrick99 via ``F99.extinguish``.
@@ -108,6 +109,10 @@ def apply_f99_extinction(
         copy of ``flux``.
     r_v :
         Total-to-selective extinction (Path-2 default ``3.1``).
+    alambda_over_av :
+        Optional precomputed ``A_λ/A_V`` on ``wave_aa`` (same shape). When
+        given, attenuation is ``10**(-0.4 * a_v * alambda_over_av)`` and the
+        dust_extinction model is not re-evaluated (Path-2 photometry hot path).
 
     Returns
     -------
@@ -130,6 +135,12 @@ def apply_f99_extinction(
         raise ValueError(f"a_v must be >= 0; got {a_v}")
     if a_v == 0.0:
         return flux_arr.copy()
+
+    if alambda_over_av is not None:
+        al_av = np.asarray(alambda_over_av, dtype=np.float64)
+        if al_av.shape != wave.shape:
+            raise ValueError("alambda_over_av must match wave_aa shape")
+        return flux_arr * np.power(10.0, -0.4 * float(a_v) * al_av)
 
     wave_clip = np.clip(wave, _F99_WAVE_AA_MIN, _F99_WAVE_AA_MAX)
     ext = f99_model(r_v=r_v)

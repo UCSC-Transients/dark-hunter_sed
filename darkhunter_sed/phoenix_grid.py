@@ -18,6 +18,10 @@ Dilute each luminous component to Earth → **sum** fluxes on a common λ grid �
 apply F99 (R_V=3.1) to the **combined** SED → **then** synthesize photometry
 (:func:`synthesize_mags`). Multi-star / WD / IR-BB models must use the same
 combine → redden → synth sequence (never stack per-component magnitudes).
+
+Photometry fits call :meth:`PhoenixGrid.set_photometry_wavelengths` with the
+union of bandpass wavesets so dynesty likelihoods blend/redden on that short
+grid rather than full HiRes (~1.57M λ).
 """
 
 from __future__ import annotations
@@ -33,7 +37,11 @@ from astropy.io import fits
 from numpy.typing import NDArray
 
 from darkhunter_sed.config import phoenix_dir
-from darkhunter_sed.extinction_f99 import DEFAULT_R_V, apply_f99_extinction
+from darkhunter_sed.extinction_f99 import (
+    DEFAULT_R_V,
+    apply_f99_extinction,
+    f99_alambda_over_av,
+)
 
 FluxLoader = Callable[[Path], NDArray[np.floating]]
 
@@ -364,6 +372,10 @@ class PhoenixGrid:
         self._flux_loader = flux_loader
         self._flux_cache_size = max(int(flux_cache_size), 0)
         self._flux_cache: OrderedDict[Path, NDArray[np.float64]] = OrderedDict()
+        # Optional photometry λ grid: dynesty evaluates SED here, not on HiRes.
+        self._phot_wave: NDArray[np.float64] | None = None
+        self._phot_flux_cache: OrderedDict[Path, NDArray[np.float64]] = OrderedDict()
+        self._phot_alav: dict[float, NDArray[np.float64]] = {}
         if wavelength is not None:
             self.wavelength = np.asarray(wavelength, dtype=np.float64).reshape(-1)
         else:
@@ -463,6 +475,80 @@ class PhoenixGrid:
             while len(self._flux_cache) > self._flux_cache_size:
                 self._flux_cache.popitem(last=False)
         return flux
+
+    def set_photometry_wavelengths(
+        self,
+        wave_aa: NDArray[np.floating] | None,
+    ) -> NDArray[np.float64] | None:
+        """
+        Restrict Path-2 photometry SED evaluation to ``wave_aa`` (Å).
+
+        Parameters
+        ----------
+        wave_aa :
+            Sorted photometry wavelength grid (typically the unique union of
+            bandpass wavesets), or ``None`` to clear and use full HiRes again.
+
+        Returns
+        -------
+        NDArray[np.float64] | None
+            The active photometry grid (copy), or ``None`` if cleared.
+
+        Limits
+        ------
+        Corner HiRes spectra are still loaded once, then resampled onto this
+        grid and cached. Dynesty likelihoods should call this once per fit.
+        """
+        if wave_aa is None:
+            self._phot_wave = None
+            self._phot_flux_cache.clear()
+            self._phot_alav.clear()
+            return None
+        wave = np.asarray(wave_aa, dtype=np.float64).reshape(-1)
+        if wave.size < 2:
+            raise ValueError("photometry wavelength grid needs ≥2 samples")
+        if not np.all(np.diff(wave) > 0.0):
+            wave = np.unique(wave)
+        if (
+            self._phot_wave is not None
+            and self._phot_wave.shape == wave.shape
+            and np.allclose(self._phot_wave, wave, rtol=0.0, atol=1e-9)
+        ):
+            return self._phot_wave
+        self._phot_wave = wave.copy()
+        self._phot_flux_cache.clear()
+        self._phot_alav.clear()
+        return self._phot_wave
+
+    def _load_for_sed(self, point: PhoenixPoint) -> NDArray[np.float64]:
+        """HiRes load, or resampled onto :attr:`_phot_wave` when set."""
+        if self._phot_wave is None:
+            return self._load(point)
+        key = point.path
+        cached = self._phot_flux_cache.get(key)
+        if cached is not None:
+            self._phot_flux_cache.move_to_end(key)
+            return cached
+        hi = self._load(point)
+        flux = np.interp(self._phot_wave, self.wavelength, hi)
+        if self._flux_cache_size > 0:
+            self._phot_flux_cache[key] = flux
+            self._phot_flux_cache.move_to_end(key)
+            while len(self._phot_flux_cache) > self._flux_cache_size:
+                self._phot_flux_cache.popitem(last=False)
+        return flux
+
+    def _phot_alav_curve(self, r_v: float) -> NDArray[np.float64] | None:
+        """Cached ``A_λ/A_V`` on the photometry grid, or ``None`` if HiRes mode."""
+        if self._phot_wave is None:
+            return None
+        key = float(r_v)
+        cached = self._phot_alav.get(key)
+        if cached is not None:
+            return cached
+        al = f99_alambda_over_av(self._phot_wave, r_v=r_v)
+        self._phot_alav[key] = al
+        return al
 
     def nearest_point(
         self,
@@ -623,7 +709,7 @@ class PhoenixGrid:
                             f"Missing PHOENIX corner Teff={t}, logg={g}, "
                             f"[M/H]={m}, [α/Fe]={alpha}"
                         )
-                    corners[(t, g, m)] = self._load(self._index[key4])
+                    corners[(t, g, m)] = self._load_for_sed(self._index[key4])
 
         return _multilinear(
             corners,
@@ -665,18 +751,38 @@ class PhoenixGrid:
         Returns
         -------
         wave, flux :
-            Wavelength (Å) and extincted flux density.
+            Wavelength (Å) and extincted flux density. When
+            :meth:`set_photometry_wavelengths` is active, ``wave`` is that
+            photometry grid (not full HiRes).
+
+        Limits
+        ------
+        Path-2 photometry fits should set a bandpass λ grid so dynesty does not
+        blend 1.57M-point arrays every call.
         """
-        wave, flux = self.spectrum(
-            teff_k, logg, mh, alpha, interpolate=interpolate
-        )
+        if self._phot_wave is not None:
+            if not interpolate:
+                pt = self.nearest_point(teff_k, logg, mh, alpha)
+                flux = self._load_for_sed(pt).copy()
+            else:
+                flux = self._interpolate_flux(
+                    float(teff_k), float(logg), float(mh), float(alpha)
+                )
+            wave = self._phot_wave
+        else:
+            wave, flux = self.spectrum(
+                teff_k, logg, mh, alpha, interpolate=interpolate
+            )
         if (radius_cm is None) ^ (distance_pc is None):
             raise ValueError("Provide both radius_cm and distance_pc, or neither")
         if radius_cm is not None and distance_pc is not None:
             flux = scale_surface_to_earth(
                 flux, radius_cm=radius_cm, distance_pc=distance_pc
             )
-        flux = apply_f99_extinction(wave, flux, a_v, r_v=r_v)
+        alav = self._phot_alav_curve(r_v)
+        flux = apply_f99_extinction(
+            wave, flux, a_v, r_v=r_v, alambda_over_av=alav
+        )
         return wave, flux
 
 
@@ -899,7 +1005,21 @@ def phoenix_synth_phot(
     1-star convenience wrapper. Multi-component models must sum diluted
     spectra, call F99 once on the sum, then :func:`synthesize_mags`.
     Same as :meth:`PhoenixGrid.extincted_spectrum` and :func:`synthesize_mags`.
+
+    Sets :meth:`PhoenixGrid.set_photometry_wavelengths` from the bandpass
+    waveset union so interp+F99 run on that grid (not full HiRes).
     """
+    from darkhunter_sed.filters_synphot import (
+        bandpass_wavelength_grid,
+        load_bandpass,
+    )
+
+    bps: Mapping[str, object]
+    if bandpasses is not None:
+        bps = bandpasses
+    else:
+        bps = {b: load_bandpass(b) for b in bands}
+    grid.set_photometry_wavelengths(bandpass_wavelength_grid(bps))
     wave, flux = grid.extincted_spectrum(
         teff_k,
         logg,
@@ -915,5 +1035,5 @@ def phoenix_synth_phot(
         flux,
         bands,
         systems=systems,
-        bandpasses=bandpasses,
+        bandpasses=bps,
     )
