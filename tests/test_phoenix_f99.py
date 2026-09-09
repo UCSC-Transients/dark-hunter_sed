@@ -399,3 +399,64 @@ def test_phot_grid_extincted_faster_than_long_hires() -> None:
     assert dt_ph < dt_hi
     assert dt_ph < 0.5, f"phot-λ extincted_spectrum too slow: {dt_ph:.3f}s"
 
+
+# ---------------------------------------------------------------------------
+# Issue #35 — pre-computed α-slice axes and bandpass_wavelength_grid skip
+# ---------------------------------------------------------------------------
+
+def test_alpha_slices_populated_at_init() -> None:
+    """PhoenixGrid pre-computes _alpha_teffs/_loggs/_mhs for every α at __init__."""
+    grid = _mock_grid()
+    # Mock grid: (5000, 5200) × (4.0, 4.5) × (0.0,) × (0.0, 0.2)
+    assert 0.0 in grid._alpha_teffs, "alpha=0.0 slice missing"
+    assert 0.2 in grid._alpha_teffs, "alpha=0.2 slice missing"
+    assert grid._alpha_teffs[0.0] == [5000.0, 5200.0]
+    assert grid._alpha_loggs[0.0] == [4.0, 4.5]
+    assert grid._alpha_mhs[0.0] == [0.0]
+    assert grid._alpha_teffs[0.2] == [5000.0, 5200.0]
+    assert grid._alpha_loggs[0.2] == [4.0, 4.5]
+    assert grid._alpha_mhs[0.2] == [0.0]
+
+
+def test_interp_3d_still_correct_with_precomputed_axes() -> None:
+    """Regression: _interp_3d_at_alpha result unchanged after switch to pre-computed axes."""
+    grid = _mock_grid()
+    wave, flux = grid.spectrum(5100.0, 4.25, 0.0, 0.1, interpolate=True)
+    expected = 5100.0 + 100.0 * 4.25 + 1000.0 * 0.0 + 5000.0 * 0.1
+    np.testing.assert_allclose(flux, expected, rtol=1e-10)
+
+
+def test_phoenix_synth_phot_skips_grid_setup_when_phot_wave_set() -> None:
+    """phoenix_synth_phot skips bandpass_wavelength_grid when grid._phot_wave is set."""
+    from unittest.mock import patch
+
+    from darkhunter_sed.filters_synphot import bandpass_wavelength_grid
+
+    grid = _mock_grid()
+    wave = grid.wavelength
+    bp = _flat_bp(np.linspace(4500.0, 5500.0, 30, dtype=np.float64), "g")
+    bps = {"g": bp}
+
+    # Pre-set the photometry wavelengths — same as fit_1star_dynesty does upfront.
+    grid.set_photometry_wavelengths(bandpass_wavelength_grid(bps))
+    assert grid._phot_wave is not None
+
+    call_count: list[int] = [0]
+    original_fn = bandpass_wavelength_grid
+
+    def _counting(mapping):
+        call_count[0] += 1
+        return original_fn(mapping)
+
+    with patch("darkhunter_sed.filters_synphot.bandpass_wavelength_grid", _counting):
+        result = phoenix_synth_phot(
+            grid, 5100.0, 4.25, 0.0, 0.0, 0.0, ["g"],
+            bandpasses=bps, systems=("ab",),
+        )
+
+    assert call_count[0] == 0, (
+        "bandpass_wavelength_grid called even though grid._phot_wave was already set"
+    )
+    assert "g" in result
+    assert "ab" in result["g"]
+
