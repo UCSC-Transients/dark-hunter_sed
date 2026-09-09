@@ -1,8 +1,8 @@
 """
 Path-2 dynesty nested sampling for photometry SED models.
 
-This issue: **1-star** only. Reports **lnZ** from dynesty and **BIC** from the
-maximum-likelihood sample. Writes under ``output/phot_sed/``.
+Supports **1-star** and **2-star coeval** models.  Reports **lnZ** from dynesty
+and **BIC** from the maximum-likelihood sample. Writes under ``output/phot_sed/``.
 """
 
 from __future__ import annotations
@@ -26,9 +26,13 @@ from darkhunter_sed.misty_iso import (
 from darkhunter_sed.phot_sed_io import FLAG_DETECTION, FLAG_UPPER_LIMIT, PhotRow
 from darkhunter_sed.phot_sed_models import (
     ONE_STAR_PARAM_NAMES,
+    TWO_STAR_PARAM_NAMES,
     OneStarPrediction,
     SynthPhotFn,
+    SynthPhot2StarFn,
+    TwoStarPrediction,
     predict_1star_phot,
+    predict_2star_phot,
 )
 from darkhunter_sed.phoenix_grid import PhoenixGrid
 
@@ -557,6 +561,400 @@ def run_1star_fit(
         bandpasses=bps,
     )
     paths = write_1star_outputs(
+        result, gaia_id=gaia_id, out_dir=out_dir, best_pred=best_pred
+    )
+    return result, paths
+
+
+# ---------------------------------------------------------------------------
+# 2-star coeval fit (Issue #31)
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True, slots=True)
+class TwoStarPriorBounds:
+    """
+    Uniform prior hypercube for 2-star coeval parameters.
+
+    Parameters
+    ----------
+    eep1, mass1, mass2, feh, afe, a_v, parallax_mas :
+        Inclusive ``(lo, hi)`` bounds in :data:`TWO_STAR_PARAM_NAMES` order.
+
+    Notes
+    -----
+    ``mass2`` prior is independent uniform; the constraint ``M₁ ≥ M₂`` is
+    enforced inside the likelihood (returns ``−∞`` when violated) so dynesty's
+    live-point distribution correctly respects the constraint without a
+    non-rectangular prior transform.
+    """
+
+    eep1: tuple[float, float] = DEFAULT_EEP_BOUNDS
+    mass1: tuple[float, float] = DEFAULT_MASS_BOUNDS
+    mass2: tuple[float, float] = DEFAULT_MASS_BOUNDS
+    feh: tuple[float, float] = DEFAULT_FEH_BOUNDS
+    afe: tuple[float, float] = DEFAULT_AFE_BOUNDS
+    a_v: tuple[float, float] = DEFAULT_AV_BOUNDS
+    parallax_mas: tuple[float, float] = DEFAULT_PARALLAX_BOUNDS
+
+    def as_list(self) -> list[tuple[float, float]]:
+        """Return bounds in dynesty parameter order."""
+        return [
+            self.eep1, self.mass1, self.mass2,
+            self.feh, self.afe, self.a_v, self.parallax_mas,
+        ]
+
+
+@dataclass(frozen=True, slots=True)
+class FitResult2Star:
+    """
+    2-star dynesty summary (same structure as :class:`FitResult1Star`).
+
+    Parameters
+    ----------
+    param_names :
+        Free-parameter labels (7 for 2-star).
+    samples :
+        Equally weighted posterior samples ``(n_samples, 7)``.
+    logl :
+        Log-likelihood at each nested-sampling dead point.
+    logz, logz_err :
+        Bayesian evidence ``ln Z`` and its uncertainty.
+    bic :
+        BIC from the maximum-likelihood nested-sampling point.
+    ln_l_max :
+        Max log-likelihood among nested-sampling live/dead points.
+    best_theta :
+        Parameter vector at ``ln_l_max``.
+    n_data :
+        Number of photometry rows used in the likelihood.
+    n_free :
+        Number of free parameters (7).
+    nlive :
+        Nested-sampling live points.
+    """
+
+    param_names: tuple[str, ...]
+    samples: NDArray[np.float64]
+    logl: NDArray[np.float64]
+    logz: float
+    logz_err: float
+    bic: float
+    ln_l_max: float
+    best_theta: NDArray[np.float64]
+    n_data: int
+    n_free: int
+    nlive: int
+
+
+def fit_2star_dynesty(
+    rows: Sequence[PhotRow],
+    *,
+    mist_predictor: MistPredictFn,
+    phoenix_grid: PhoenixGrid | None = None,
+    synth_2star: SynthPhot2StarFn | None = None,
+    bounds: TwoStarPriorBounds | None = None,
+    nlive: int = 100,
+    maxiter: int | None = None,
+    seed: int | None = 42,
+    bandpasses: Mapping[str, object] | None = None,
+    mag_system: str = "ab",
+    dlogz: float = 1.0,
+    sample: str = "auto",
+    bound: str = "multi",
+    nworkers: int = 1,
+    jit_warmup: bool = True,
+    eep2_xtol: float = 0.5,
+) -> FitResult2Star:
+    """
+    Run dynesty nested sampling on the 2-star coeval Path-2 model.
+
+    Parameters
+    ----------
+    rows :
+        Photometry rows (at least one detection recommended).
+    mist_predictor :
+        Injectable MISTy ``getMIST`` (required so CI can mock).
+    phoenix_grid, synth_2star :
+        Forward model; one of them required.
+    bounds :
+        Uniform prior bounds; default is :class:`TwoStarPriorBounds`.
+    nlive, maxiter, seed, dlogz, sample, bound, nworkers, jit_warmup :
+        Dynesty / performance controls; see :func:`fit_1star_dynesty`.
+    eep2_xtol :
+        EEP tolerance for the coeval solver (passed to
+        :func:`~darkhunter_sed.phot_sed_models.solve_eep2_for_age_match`).
+        Default 0.5 EEP ≈ sub-0.1 Gyr age residual for typical tracks.
+
+    Returns
+    -------
+    FitResult2Star
+        Posterior samples, ``lnZ``, and BIC from max-L.
+
+    Limits
+    ------
+    ``M₁ ≥ M₂`` enforced as a ``−∞`` likelihood gate (not a prior boundary).
+    No coeval EEP₂ solution → ``−∞`` likelihood (logged, not raised, inside
+    dynesty). Uniform priors only.
+    """
+    import multiprocessing
+
+    from dynesty import NestedSampler
+
+    if not rows:
+        raise ValueError("rows must be non-empty")
+    prior = bounds if bounds is not None else TwoStarPriorBounds()
+    bound_list = prior.as_list()
+    bands = [r.band for r in rows]
+    ndim = len(TWO_STAR_PARAM_NAMES)
+
+    bps = bandpasses
+    if bps is None and synth_2star is None:
+        bps = load_bandpasses_for_bands(bands)
+    if phoenix_grid is not None and bps is not None:
+        from darkhunter_sed.filters_synphot import bandpass_wavelength_grid
+
+        phoenix_grid.set_photometry_wavelengths(bandpass_wavelength_grid(bps))
+
+    # JIT warm-up: drive MISTy compilation before sampler allocates live points.
+    if jit_warmup:
+        _mid = np.array([0.5 * (lo + hi) for lo, hi in bound_list], dtype=np.float64)
+        # Ensure mass2 <= mass1 for the warm-up point.
+        _mid[2] = min(_mid[2], _mid[1])
+        try:
+            predict_2star_phot(
+                _mid,
+                bands,
+                mist_predictor=mist_predictor,
+                phoenix_grid=phoenix_grid,
+                synth_2star=synth_2star,
+                systems=("ab",),
+                bandpasses=bps,
+                mag_system=mag_system,
+                eep2_xtol=eep2_xtol,
+            )
+        except Exception:
+            pass
+
+    def prior_transform(u: NDArray[np.floating]) -> NDArray[np.float64]:
+        return _unit_cube_to_bounds(u, bound_list)
+
+    def loglike(theta: NDArray[np.floating]) -> float:
+        try:
+            pred = predict_2star_phot(
+                theta,
+                bands,
+                mist_predictor=mist_predictor,
+                phoenix_grid=phoenix_grid,
+                synth_2star=synth_2star,
+                systems=("ab",),
+                bandpasses=bps,
+                mag_system=mag_system,
+                eep2_xtol=eep2_xtol,
+            )
+        except Exception:
+            return -np.inf
+        return photometry_loglike(pred.mags, rows)
+
+    pool: Any = None
+    queue_size: int | None = None
+    if nworkers > 1:
+        pool = multiprocessing.Pool(int(nworkers))
+        queue_size = int(nworkers)
+
+    try:
+        sampler = NestedSampler(
+            loglike,
+            prior_transform,
+            ndim,
+            nlive=int(nlive),
+            sample=sample,
+            bound=bound,
+            rstate=np.random.default_rng(seed) if seed is not None else None,
+            pool=pool,
+            queue_size=queue_size,
+        )
+        run_kw: dict[str, Any] = {"print_progress": False, "dlogz": float(dlogz)}
+        if maxiter is not None:
+            run_kw["maxiter"] = int(maxiter)
+        sampler.run_nested(**run_kw)
+    finally:
+        if pool is not None:
+            pool.terminate()
+            pool.join()
+
+    res = sampler.results
+    logl = np.asarray(res.logl, dtype=np.float64)
+    samples_u = np.asarray(res.samples, dtype=np.float64)
+    imax = int(np.argmax(logl))
+    ln_l_max = float(logl[imax])
+    best_theta = samples_u[imax].copy()
+    n_data = len(rows)
+    bic = bic_from_max_likelihood(ln_l_max=ln_l_max, n_free=ndim, n_data=n_data)
+
+    try:
+        from dynesty.utils import resample_equal
+
+        weights = np.exp(np.asarray(res.logwt, dtype=np.float64) - float(res.logz[-1]))
+        eq = np.asarray(resample_equal(samples_u, weights), dtype=np.float64)
+    except Exception:
+        eq = samples_u
+
+    logz = float(res.logz[-1])
+    logz_err = (
+        float(res.logzerr[-1]) if getattr(res, "logzerr", None) is not None else float("nan")
+    )
+
+    return FitResult2Star(
+        param_names=TWO_STAR_PARAM_NAMES,
+        samples=eq,
+        logl=logl,
+        logz=logz,
+        logz_err=logz_err,
+        bic=bic,
+        ln_l_max=ln_l_max,
+        best_theta=best_theta,
+        n_data=n_data,
+        n_free=ndim,
+        nlive=int(nlive),
+    )
+
+
+def write_2star_outputs(
+    result: FitResult2Star,
+    *,
+    gaia_id: str,
+    out_dir: Path | str | None = None,
+    best_pred: TwoStarPrediction | None = None,
+) -> dict[str, Path]:
+    """
+    Write 2-star fit products under ``output/phot_sed/``.
+
+    Parameters
+    ----------
+    result :
+        :class:`FitResult2Star` from :func:`fit_2star_dynesty`.
+    gaia_id :
+        Object id string (used in filenames).
+    out_dir :
+        Override root; default :func:`~darkhunter_sed.config.phot_sed_dir`.
+    best_pred :
+        Optional max-L forward prediction for the summary JSON.
+
+    Returns
+    -------
+    dict[str, Path]
+        Paths for ``summary_json`` and ``samples_npz``.
+    """
+    root = Path(out_dir).expanduser().resolve() if out_dir is not None else phot_sed_dir()
+    root.mkdir(parents=True, exist_ok=True)
+    stem = f"Gaia_DR3_{gaia_id}_2star"
+    summary_path = root / f"{stem}_summary.json"
+    samples_path = root / f"{stem}_samples.npz"
+
+    summary: dict[str, Any] = {
+        "schema_version": 1,
+        "model": "2star",
+        "gaia_id": str(gaia_id),
+        "param_names": list(result.param_names),
+        "logz": result.logz,
+        "logz_err": result.logz_err,
+        "bic": result.bic,
+        "ln_l_max": result.ln_l_max,
+        "best_theta": {n: float(v) for n, v in zip(result.param_names, result.best_theta)},
+        "n_data": result.n_data,
+        "n_free": result.n_free,
+        "nlive": result.nlive,
+        "n_samples": int(result.samples.shape[0]),
+    }
+    if best_pred is not None:
+        summary["best_mags"] = {k: float(v) for k, v in best_pred.mags.items()}
+        summary["eep2_solved"] = best_pred.eep2
+        summary["distance_pc"] = best_pred.distance_pc
+        for star_idx, mist in enumerate((best_pred.mist1, best_pred.mist2), start=1):
+            summary[f"best_mist{star_idx}"] = {
+                "teff_k": mist.teff_k,
+                "logg": mist.logg,
+                "radius_rsun": mist.radius_rsun,
+                "age_gyr": mist.age_gyr,
+                "log_l": mist.log_l,
+                "mass_current": mist.mass_current,
+            }
+
+    summary_path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+    np.savez_compressed(
+        samples_path,
+        samples=result.samples,
+        logl=result.logl,
+        param_names=np.asarray(result.param_names),
+        best_theta=result.best_theta,
+        logz=np.asarray([result.logz, result.logz_err], dtype=np.float64),
+        bic=np.asarray([result.bic], dtype=np.float64),
+    )
+    return {"summary_json": summary_path, "samples_npz": samples_path}
+
+
+def run_2star_fit(
+    rows: Sequence[PhotRow],
+    *,
+    gaia_id: str,
+    mist_predictor: MistPredictFn,
+    phoenix_grid: PhoenixGrid | None = None,
+    synth_2star: SynthPhot2StarFn | None = None,
+    bounds: TwoStarPriorBounds | None = None,
+    out_dir: Path | str | None = None,
+    nlive: int = 100,
+    maxiter: int | None = None,
+    seed: int | None = 42,
+    bandpasses: Mapping[str, object] | None = None,
+    dlogz: float = 1.0,
+    sample: str = "auto",
+    bound: str = "multi",
+    nworkers: int = 1,
+    jit_warmup: bool = True,
+    eep2_xtol: float = 0.5,
+) -> tuple[FitResult2Star, dict[str, Path]]:
+    """
+    Fit 2-star coeval + write ``output/phot_sed/`` products.
+
+    Parameters
+    ----------
+    eep2_xtol :
+        Forwarded to :func:`fit_2star_dynesty`.
+
+    See also :func:`fit_2star_dynesty` and :func:`write_2star_outputs`.
+    """
+    result = fit_2star_dynesty(
+        rows,
+        mist_predictor=mist_predictor,
+        phoenix_grid=phoenix_grid,
+        synth_2star=synth_2star,
+        bounds=bounds,
+        nlive=nlive,
+        maxiter=maxiter,
+        seed=seed,
+        bandpasses=bandpasses,
+        dlogz=dlogz,
+        sample=sample,
+        bound=bound,
+        nworkers=nworkers,
+        jit_warmup=jit_warmup,
+        eep2_xtol=eep2_xtol,
+    )
+    bands = [r.band for r in rows]
+    bps = bandpasses
+    if bps is None and synth_2star is None:
+        bps = load_bandpasses_for_bands(bands)
+    best_pred = predict_2star_phot(
+        result.best_theta,
+        bands,
+        mist_predictor=mist_predictor,
+        phoenix_grid=phoenix_grid,
+        synth_2star=synth_2star,
+        systems=("ab",),
+        bandpasses=bps,
+        eep2_xtol=eep2_xtol,
+    )
+    paths = write_2star_outputs(
         result, gaia_id=gaia_id, out_dir=out_dir, best_pred=best_pred
     )
     return result, paths
