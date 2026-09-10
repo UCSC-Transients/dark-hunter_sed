@@ -278,7 +278,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.model in ("1star", "2star"):
         if args.model == "1star":
-            result, paths = run_1star_fit(rows, bounds=OneStarPriorBounds(), **common_kw)
+            result, paths = run_1star_fit(rows, bounds=None, **common_kw)
         else:
             result, paths = run_2star_fit(rows, bounds=TwoStarPriorBounds(), **common_kw)
         print(
