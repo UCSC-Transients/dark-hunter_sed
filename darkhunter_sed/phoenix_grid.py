@@ -997,6 +997,63 @@ def synthesize_mags(
     return out
 
 
+# Physical constants (CGS) for blackbody calculation.
+_H_CGS: float = 6.62607015e-27    # erg·s
+_C_CGS: float = 2.99792458e10     # cm/s
+_K_CGS: float = 1.380649e-16      # erg/K
+_SIGMA_SB_CGS: float = 5.670374419e-5  # erg/s/cm²/K⁴
+_L_SUN_ERG: float = 3.828e33      # erg/s
+
+
+def bb_flux_flam_at_earth(
+    wave_aa: NDArray[np.float64],
+    t_bb_k: float,
+    l_bb_lsun: float,
+    distance_pc: float,
+) -> NDArray[np.float64]:
+    """
+    Planck blackbody FLAM (erg/s/cm²/Å) at Earth for a given luminosity and temperature.
+
+    The BB radius is derived from Stefan-Boltzmann: R_bb = √(L_bb / 4π σ T_bb⁴).
+    Earth-frame F_λ = π B_λ(T) × (R_bb / d)² = L_bb × B_λ(T) / (4 σ T_bb⁴ d²).
+
+    Parameters
+    ----------
+    wave_aa :
+        Wavelengths in Angstroms (must be positive).
+    t_bb_k :
+        Blackbody temperature in Kelvin (``> 0``).
+    l_bb_lsun :
+        Bolometric luminosity in solar units (``> 0``).
+    distance_pc :
+        Heliocentric distance in parsecs (``> 0``).
+
+    Returns
+    -------
+    NDArray[np.float64]
+        FLAM in erg/s/cm²/Å on ``wave_aa``; same shape as input.
+
+    Limits
+    ------
+    No extinction applied here — apply F99 to the combined stellar+BB SED after summing.
+    Returns zeros (not NaN) for wavelengths where the Planck exponential overflows.
+    """
+    wave_aa = np.asarray(wave_aa, dtype=np.float64)
+    wave_cm = wave_aa * 1.0e-8  # Å → cm
+    hc_lkT = _H_CGS * _C_CGS / (wave_cm * _K_CGS * float(t_bb_k))
+    # B_lambda in erg/s/cm²/sr/cm; use expm1 for numerical stability.
+    # np.expm1 saturates to -1 for very large negative args and overflows for very large positive;
+    # clip the exponent to avoid division-by-zero or inf in the denominator.
+    hc_lkT_clipped = np.clip(hc_lkT, 0.0, 709.0)  # exp(709) ≈ DBL_MAX
+    planck_per_cm = 2.0 * _H_CGS * _C_CGS**2 / wave_cm**5 / np.expm1(hc_lkT_clipped)
+    planck_flam = planck_per_cm * 1.0e-8  # erg/s/cm²/sr/Å (divide by 1 cm / 1e8 Å)
+    # F_lambda = L_bb × B_λ(T) / (4 σ T_bb⁴ d²)
+    l_bb_erg = float(l_bb_lsun) * _L_SUN_ERG
+    d_cm = float(distance_pc) * _PC_TO_CM
+    factor = l_bb_erg / (4.0 * _SIGMA_SB_CGS * float(t_bb_k) ** 4 * d_cm**2)
+    return planck_flam * factor
+
+
 def phoenix_synth_phot(
     grid: PhoenixGrid,
     teff_k: float,
@@ -1011,9 +1068,11 @@ def phoenix_synth_phot(
     systems: Sequence[str] = ("ab",),
     bandpasses: Mapping[str, object] | None = None,
     r_v: float = DEFAULT_R_V,
+    bb_t_k: float | None = None,
+    bb_l_lsun: float | None = None,
 ) -> dict[str, dict[str, float]]:
     """
-    End-to-end Path-2 forward photometry: PHOENIX → dilute → F99 → synth mags.
+    End-to-end Path-2 forward photometry: PHOENIX → dilute → [+BB] → F99 → synth mags.
 
     Parameters
     ----------
@@ -1027,6 +1086,11 @@ def phoenix_synth_phot(
         Optional geometric dilution (both or neither).
     systems, bandpasses, r_v :
         Forwarded to :func:`synthesize_mags` / F99.
+    bb_t_k, bb_l_lsun :
+        Optional IR blackbody temperature (K) and luminosity (L☉).
+        When both are provided, BB FLAM is added to the stellar FLAM **before**
+        F99 extinction, consistent with Path-2 SED order.
+        Requires ``distance_pc`` to be set.
 
     Returns
     -------
@@ -1061,11 +1125,17 @@ def phoenix_synth_phot(
         logg,
         mh,
         alpha,
-        a_v,
+        0.0,  # apply F99 after summing with BB (if any)
         radius_cm=radius_cm,
         distance_pc=distance_pc,
         r_v=r_v,
     )
+    if bb_t_k is not None and bb_l_lsun is not None:
+        if distance_pc is None:
+            raise ValueError("distance_pc is required for BB component")
+        flux = flux + bb_flux_flam_at_earth(wave, bb_t_k, bb_l_lsun, distance_pc)
+    alav = grid._phot_alav_curve(r_v)
+    flux = apply_f99_extinction(wave, flux, float(a_v), r_v=r_v, alambda_over_av=alav)
     return synthesize_mags(
         wave,
         flux,
@@ -1088,9 +1158,11 @@ def phoenix_synth_phot_2star(
     systems: Sequence[str] = ("ab",),
     bandpasses: Mapping[str, object] | None = None,
     r_v: float = DEFAULT_R_V,
+    bb_t_k: float | None = None,
+    bb_l_lsun: float | None = None,
 ) -> dict[str, dict[str, float]]:
     """
-    2-star coeval Path-2 forward photometry: dilute both stars → sum → F99 → mags.
+    2-star coeval Path-2 forward photometry: dilute both stars → sum → [+BB] → F99 → mags.
 
     Parameters
     ----------
@@ -1110,6 +1182,10 @@ def phoenix_synth_phot_2star(
         Shared heliocentric distance in pc (``> 0``).
     systems, bandpasses, r_v :
         Forwarded to :func:`synthesize_mags` / F99.
+    bb_t_k, bb_l_lsun :
+        Optional IR blackbody temperature (K) and luminosity (L☉).
+        When both are provided, BB FLAM is added to the combined stellar SED
+        **before** F99 extinction.
 
     Returns
     -------
@@ -1119,7 +1195,7 @@ def phoenix_synth_phot_2star(
     Limits
     ------
     Path-2 multi-component order: dilute star 1 (no extinction) + dilute star 2
-    (no extinction) → **sum** on the bandpass-λ grid → F99 applied once to the
+    (no extinction) [+ BB] → **sum** on the bandpass-λ grid → F99 applied once to the
     combined SED → synthesize mags.  The ``extincted_spectrum(a_v=0)`` fast path
     avoids double extinction.  Both stars share the same ``mh``, ``alpha``, and
     photometry wavelength grid.
@@ -1159,8 +1235,10 @@ def phoenix_synth_phot_2star(
         distance_pc=float(distance_pc),
         r_v=r_v,
     )
-    # Sum diluted spectra, then apply F99 once to the combined SED.
+    # Sum diluted spectra (and optional BB), then apply F99 once to the combined SED.
     combined = flux1 + flux2
+    if bb_t_k is not None and bb_l_lsun is not None:
+        combined = combined + bb_flux_flam_at_earth(wave, bb_t_k, bb_l_lsun, float(distance_pc))
     alav = grid._phot_alav_curve(r_v)
     combined = apply_f99_extinction(wave, combined, float(a_v), r_v=r_v, alambda_over_av=alav)
 

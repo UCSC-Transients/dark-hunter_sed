@@ -49,6 +49,10 @@ from darkhunter_sed.phot_sed_io import FLAG_DETECTION, PhotRow
 
 # Parameter order (locked for this module).
 _PARAM_NAMES: tuple[str, ...] = ("teff_wd", "logg_wd", "av", "parallax_mas")
+# Extra parameters appended when --ir-bb is active.
+_BB_PARAM_NAMES: tuple[str, ...] = ("log10_T_bb", "log10_L_bb")
+_AB_ZEROPOINT_ERG_HZ: float = 3.631e-20   # AB zero-point F_nu in erg/s/cm²/Hz
+_C_AA_PER_S: float = 2.99792458e18        # speed of light in Å/s
 
 
 # ---------------------------------------------------------------------------
@@ -86,6 +90,27 @@ class WDPriorBounds:
         for i, (lo, hi) in enumerate(bounds):
             result[i] = lo + u[i] * (hi - lo)
         return result
+
+
+@dataclass(frozen=True, slots=True)
+class BBPriorBounds:
+    """
+    Uniform prior bounds for the optional IR blackbody component.
+
+    Parameters
+    ----------
+    log10_t_bb :
+        ``(lo, hi)`` for log₁₀(T_bb / K).  Default covers 100 K – 31 623 K.
+    log10_l_bb :
+        ``(lo, hi)`` for log₁₀(L_bb / L☉).  Default covers 10⁻⁶ – 10⁴ L☉.
+    """
+
+    log10_t_bb: tuple[float, float] = (2.0, 4.5)
+    log10_l_bb: tuple[float, float] = (-6.0, 4.0)
+
+    def as_list(self) -> list[tuple[float, float]]:
+        """Return bounds in ``_BB_PARAM_NAMES`` order."""
+        return [self.log10_t_bb, self.log10_l_bb]
 
 
 # ---------------------------------------------------------------------------
@@ -216,12 +241,56 @@ class WDFitResult:
 # ---------------------------------------------------------------------------
 # Likelihood builder
 # ---------------------------------------------------------------------------
+def _bb_apparent_mag_ab(
+    eff_wave_aa: float,
+    t_bb_k: float,
+    l_bb_lsun: float,
+    distance_pc: float,
+) -> float:
+    """
+    AB apparent magnitude of a blackbody at a single effective wavelength.
+
+    Parameters
+    ----------
+    eff_wave_aa :
+        Filter effective wavelength (Å).
+    t_bb_k :
+        Blackbody temperature (K; ``> 0``).
+    l_bb_lsun :
+        Bolometric luminosity (L☉; ``> 0``).
+    distance_pc :
+        Heliocentric distance (pc; ``> 0``).
+
+    Returns
+    -------
+    float
+        AB magnitude.  Returns ``99.0`` when flux is zero or non-finite.
+
+    Limits
+    ------
+    Uses the AB zero-point F_ν₀ = 3.631 × 10⁻²⁰ erg/s/cm²/Hz.
+    Assumes Bergeron magnitudes are in the AB system.
+    """
+    from darkhunter_sed.phoenix_grid import bb_flux_flam_at_earth
+
+    wave = np.array([float(eff_wave_aa)], dtype=np.float64)
+    f_lam = bb_flux_flam_at_earth(wave, t_bb_k, l_bb_lsun, distance_pc)[0]
+    if not np.isfinite(f_lam) or f_lam <= 0.0:
+        return 99.0
+    f_nu = f_lam * eff_wave_aa**2 / _C_AA_PER_S
+    if not np.isfinite(f_nu) or f_nu <= 0.0:
+        return 99.0
+    return float(-2.5 * math.log10(f_nu / _AB_ZEROPOINT_ERG_HZ))
+
+
 def _make_loglike(
     grid: BergeronGrid,
     ifmr: CummingsIFMR,
     obs_rows: list[PhotRow],
     bounds: WDPriorBounds,
     system_age_yr: float,
+    *,
+    bb_bounds: BBPriorBounds | None = None,
 ) -> tuple[Any, Any]:
     """
     Build (log_likelihood, prior_transform) callables for dynesty.
@@ -235,14 +304,18 @@ def _make_loglike(
     obs_rows :
         Detection-only PhotRow list (flag == 0).
     bounds :
-        Prior bounds.
+        Prior bounds for the 4 WD parameters.
     system_age_yr :
         System age in years; 0.0 → age gate disabled.
+    bb_bounds :
+        When provided, append ``log10_T_bb`` and ``log10_L_bb`` as free
+        parameters (indices 4 and 5).  The BB FLAM is added in AB-mag flux
+        space at each band's effective wavelength before extinction.
 
     Returns
     -------
     (log_likelihood, prior_transform)
-        Both accept / return 1-D numpy arrays of length 4.
+        Both accept / return 1-D numpy arrays of length 4 (or 6 with BB).
     """
     obs_bands = [r.band for r in obs_rows]
     obs_mags  = np.array([r.mag for r in obs_rows], dtype=np.float64)
@@ -263,24 +336,54 @@ def _make_loglike(
     norm_sum = float(np.sum(np.log(2.0 * math.pi * err_vec ** 2)))
 
     use_age_gate = system_age_yr > 0.0
+    use_bb = bb_bounds is not None
+    eff_waves: dict[str, float] = grid.band_eff_waves if use_bb else {}
+    ext_ratios: dict[str, float] = grid._ext_ratios if use_bb else {}
     _NEG_INF = -1e300
 
+    all_bounds = bounds.as_list() + (bb_bounds.as_list() if bb_bounds is not None else [])
+
     def log_likelihood(params: NDArray[np.float64]) -> float:
-        teff, logg, av, plx = params
+        teff, logg, av, plx = params[0], params[1], params[2], params[3]
         if plx <= 0.0:
             return _NEG_INF
         dist_pc = 1000.0 / plx
-        result = grid.synth_phot(teff, logg, av, dist_pc, bands=band_subset)
-        if use_age_gate:
-            m_wd = result["m_wd"]
-            if not ifmr.age_gate_ok(m_wd, system_age_yr):
-                return _NEG_INF
-        pred_mags = np.array([result["mags"][b] for b in band_subset])
+
+        if use_bb:
+            log10_t_bb = float(params[4])
+            log10_l_bb = float(params[5])
+            t_bb_k = 10.0 ** log10_t_bb
+            l_bb_lsun = 10.0 ** log10_l_bb
+            # Get unextincted WD apparent mags (a_v=0 → dist_mod only).
+            result = grid.synth_phot(teff, logg, 0.0, dist_pc, bands=band_subset)
+            if use_age_gate:
+                if not ifmr.age_gate_ok(result["m_wd"], system_age_yr):
+                    return _NEG_INF
+            pred_mags_list: list[float] = []
+            for b in band_subset:
+                m_wd_unext = float(result["mags"][b])
+                m_bb_unext = _bb_apparent_mag_ab(eff_waves[b], t_bb_k, l_bb_lsun, dist_pc)
+                # Combine WD + BB in flux space (both unextincted), then add extinction.
+                f_total = 10.0 ** (-m_wd_unext / 2.5) + 10.0 ** (-m_bb_unext / 2.5)
+                m_combined_unext = -2.5 * math.log10(f_total) if f_total > 0.0 else 99.0
+                ext_mag = float(av) * ext_ratios.get(b, 0.0)
+                pred_mags_list.append(m_combined_unext + ext_mag)
+            pred_mags = np.array(pred_mags_list, dtype=np.float64)
+        else:
+            result = grid.synth_phot(teff, logg, av, dist_pc, bands=band_subset)
+            if use_age_gate:
+                if not ifmr.age_gate_ok(result["m_wd"], system_age_yr):
+                    return _NEG_INF
+            pred_mags = np.array([result["mags"][b] for b in band_subset])
+
         resid = mag_vec - pred_mags
         return -0.5 * (float(np.dot(resid ** 2, inv_var)) + norm_sum)
 
     def prior_transform(u: NDArray[np.float64]) -> NDArray[np.float64]:
-        return bounds.prior_transform(u)
+        result = np.empty(len(all_bounds))
+        for i, (lo, hi) in enumerate(all_bounds):
+            result[i] = lo + u[i] * (hi - lo)
+        return result
 
     return log_likelihood, prior_transform
 
@@ -296,6 +399,7 @@ def run_wd_fit(
     ifmr_variants: tuple[IFMRVariant, ...] = ("MIST", "PARSEC"),
     system_age_yr: float = 0.0,
     prior_bounds: WDPriorBounds | None = None,
+    bb_bounds: BBPriorBounds | None = None,
     nlive: int = 200,
     maxiter: int | None = None,
     seed: int = 42,
@@ -318,6 +422,9 @@ def run_wd_fit(
         System age in years for IFMR age gate.  ``0.0`` → disabled.
     prior_bounds :
         Uniform prior bounds; default ``WDPriorBounds()``.
+    bb_bounds :
+        When provided, activate the IR blackbody component and use these prior
+        bounds for ``log10_T_bb`` and ``log10_L_bb``.  Default ``None`` → no BB.
     nlive :
         Dynesty number of live points.
     maxiter :
@@ -346,6 +453,8 @@ def run_wd_fit(
     if not det_rows:
         raise ValueError("run_wd_fit: no detection rows in photometry.")
 
+    ndim = 4 + (2 if bb_bounds is not None else 0)
+
     results: list[WDFitResult] = []
 
     for atm in atm_types:
@@ -353,14 +462,15 @@ def run_wd_fit(
         for variant in ifmr_variants:
             ifmr = CummingsIFMR(variant)
             log_like, ptform = _make_loglike(
-                grid, ifmr, det_rows, prior_bounds, system_age_yr
+                grid, ifmr, det_rows, prior_bounds, system_age_yr,
+                bb_bounds=bb_bounds,
             )
 
             rng = np.random.default_rng(seed)
             sampler = dynesty.NestedSampler(
                 log_like,
                 ptform,
-                ndim=4,
+                ndim=ndim,
                 nlive=nlive,
                 rstate=rng,
             )

@@ -13,6 +13,7 @@ from pathlib import Path
 from darkhunter_sed.config import phot_sed_dir, photometry_dir
 from darkhunter_sed.misty_iso import load_misty_predictor, resolve_mist_nn_path
 from darkhunter_sed.phot_sed_fit import (
+    BBPriorBounds,
     OneStarPriorBounds,
     TwoStarPriorBounds,
     load_bandpasses_for_bands,
@@ -126,6 +127,16 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=False,
         help="Print dynesty progress (lnZ, ncall, remaining work) to stdout ~every 1000 iter.",
+    )
+    p.add_argument(
+        "--ir-bb",
+        action="store_true",
+        default=False,
+        help=(
+            "Add an IR blackbody component (T_bb, L_bb) to all models. "
+            "The BB is placed at the system distance, summed with stellar flux "
+            "before the shared F99 R_V=3.1 extinction is applied."
+        ),
     )
     p.add_argument(
         "--mist-nn",
@@ -429,10 +440,11 @@ def main(argv: list[str] | None = None) -> int:
             ra_deg=args.ra_deg,
             dec_deg=args.dec_deg,
         )
+        bb_bounds = BBPriorBounds() if args.ir_bb else None
         if args.model == "1star":
-            result, paths = run_1star_fit(rows, bounds=None, prior_spec=prior_spec, **common_kw)
+            result, paths = run_1star_fit(rows, bounds=None, prior_spec=prior_spec, bb_bounds=bb_bounds, **common_kw)
         else:
-            result, paths = run_2star_fit(rows, bounds=TwoStarPriorBounds(), prior_spec=prior_spec, **common_kw)
+            result, paths = run_2star_fit(rows, bounds=TwoStarPriorBounds(), prior_spec=prior_spec, bb_bounds=bb_bounds, **common_kw)
         print(
             f"{args.model} fit gaia_id={gaia_id}  lnZ={result.logz:.3f}±{result.logz_err:.3f}  "
             f"BIC={result.bic:.3f}  lnL_max={result.ln_l_max:.3f}"
@@ -468,11 +480,17 @@ def main(argv: list[str] | None = None) -> int:
         system_age_yr = float(args.system_age) * 1e9
         wd_prior_bounds = WDPriorBounds()
 
+        wd_bb_bounds_obj: object | None = None
+        if args.ir_bb:
+            from darkhunter_sed.wd_model import BBPriorBounds as WDBBPriorBounds
+            wd_bb_bounds_obj = WDBBPriorBounds()
+
         wd_results = run_wd_fit(
             rows,
             wd_dir=wd_dir,
             system_age_yr=system_age_yr,
             prior_bounds=wd_prior_bounds,
+            bb_bounds=wd_bb_bounds_obj,
             nlive=int(args.nlive),
             maxiter=args.maxiter,
             seed=int(args.seed),

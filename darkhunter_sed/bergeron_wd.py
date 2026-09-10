@@ -390,3 +390,8 @@ class BergeronGrid:
     def available_bands(self) -> list[str]:
         """Sorted list of band names in this grid."""
         return sorted(e[1] for e in self._registry)
+
+    @property
+    def band_eff_waves(self) -> dict[str, float]:
+        """Effective wavelengths (Å) for each band in this grid."""
+        return {e[1]: float(e[2]) for e in self._registry}
