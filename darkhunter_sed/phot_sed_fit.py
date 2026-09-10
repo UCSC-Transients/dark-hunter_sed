@@ -265,9 +265,10 @@ _GAIA_CONSTRAINT_BANDS = frozenset({_PLX_BAND, _TEFF_BAND, _LOGG_BAND, _MH_BAND}
 
 _PHOT_ERR_FLOOR: float = 0.02  # mag — systematic floor (PHOENIX model + zero-point)
 _SIGMA_INT_IDX: int = len(ONE_STAR_PARAM_NAMES)  # index of sigma_int in the 7-D theta
-# Finite floor returned when the model fails (off-grid MIST/PHOENIX, NaN outputs).
-# Must be finite so dynesty can always establish a non-(-inf) loglstar.
+# Finite floor returned when the model fails (off-grid MIST/PHOENIX, NaN outputs, or
+# physically impossible age).  Must be finite so dynesty always has a non-(-inf) loglstar.
 _LOGLIKE_FLOOR: float = -1e100
+_UNIVERSE_AGE_GYR: float = 13.8  # stellar age hard upper limit (physical, not photometric)
 # Gaia GSP-Phot Teff/logg are photometrically derived (G/BP/RP), so using them as
 # likelihood constraints while also fitting Gaia photometry is partially circular.
 # Inflate their errors by this factor to down-weight them accordingly.
@@ -441,6 +442,9 @@ def fit_1star_dynesty(
             return _LOGLIKE_FLOOR
         # Guard against NaN from off-grid MIST predictions.
         if not (math.isfinite(pred.mist.teff_k) and math.isfinite(pred.mist.logg)):
+            return _LOGLIKE_FLOOR
+        # Physically impossible: star older than the universe.
+        if pred.mist.age_gyr > _UNIVERSE_AGE_GYR:
             return _LOGLIKE_FLOOR
         lnl = photometry_loglike(pred.mags, phot_rows, sigma_int=sigma_int)
         if not math.isfinite(lnl):
