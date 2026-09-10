@@ -37,7 +37,7 @@ from darkhunter_sed.phot_sed_models import (
 )
 from darkhunter_sed.phoenix_grid import PhoenixGrid
 
-# Minimal uniform priors for Issue 4 (full phot_sed_priors later).
+# Minimal uniform priors; Av upper bound is now Av_SF from CSFD when prior_spec is given.
 DEFAULT_FEH_BOUNDS: tuple[float, float] = (-2.0, 0.5)
 DEFAULT_AFE_BOUNDS: tuple[float, float] = (-0.2, 0.6)
 DEFAULT_AV_BOUNDS: tuple[float, float] = (0.0, 5.0)
@@ -308,6 +308,7 @@ def fit_1star_dynesty(
     phoenix_grid: PhoenixGrid | None = None,
     synth_phot: SynthPhotFn | None = None,
     bounds: OneStarPriorBounds | None = None,
+    prior_spec: Any | None = None,
     nlive: int = 100,
     maxiter: int | None = None,
     seed: int | None = 42,
@@ -333,7 +334,16 @@ def fit_1star_dynesty(
     phoenix_grid, synth_phot :
         Forward model; one of them required (see :func:`predict_1star_phot`).
     bounds :
-        Uniform prior bounds; defaults are minimal Issue-4 uniforms.
+        Uniform prior bounds; defaults are minimal uniforms.  Ignored for
+        A_V and parallax when ``prior_spec`` is supplied.
+    prior_spec :
+        :class:`~darkhunter_sed.phot_sed_priors.PhotSedPriorSpec` from
+        :func:`~darkhunter_sed.phot_sed_priors.build_prior_spec`.  When
+        provided, overrides the A_V prior (flat ``[0, Av_SF]`` or Gaussian)
+        and/or the parallax prior (flat or Gaussian).  ``uberms`` applies
+        Gaussian priors to [Fe/H] and/or mass.  When ``plx_in_prior=True``
+        the Gaia parallax likelihood constraint is skipped to avoid
+        double-counting.
     nlive, maxiter, seed, dlogz :
         Dynesty controls. ``maxiter`` stops early (useful in tests).
         ``dlogz`` default 1.0 is appropriate for quick production fits;
@@ -406,12 +416,25 @@ def fit_1star_dynesty(
     # GSP-Phot MH/Teff/logg are photometrically derived, so using them to shrink
     # the prior would bias results; they appear only as down-weighted likelihood terms.
     prior = bounds if bounds is not None else OneStarPriorBounds()
-    if bounds is None and plx_rows:
+    if bounds is None and plx_rows and prior_spec is None:
         plx_obs = plx_rows[0].mag
         plx_err = plx_rows[0].err
         lo = max(DEFAULT_PARALLAX_BOUNDS[0], plx_obs - _PLX_SIGMA_CLIP * plx_err)
         hi = min(DEFAULT_PARALLAX_BOUNDS[1], plx_obs + _PLX_SIGMA_CLIP * plx_err)
         prior = OneStarPriorBounds(parallax_mas=(lo, hi))
+
+    # When prior_spec is provided, update bounds to reflect Av_SF cap and plx range.
+    if prior_spec is not None:
+        av_spec = prior_spec.av
+        plx_spec = prior_spec.plx
+        prior = OneStarPriorBounds(
+            eep=prior.eep,
+            mass=prior.mass,
+            feh=prior.feh,
+            a_v=(av_spec.av_lo, av_spec.av_hi),
+            parallax_mas=(plx_spec.plx_lo, plx_spec.plx_hi),
+            sigma_int=prior.sigma_int,
+        )
 
     bound_list = prior.as_list()
     bands = [r.band for r in phot_rows]
@@ -464,6 +487,30 @@ def fit_1star_dynesty(
         theta[_SIGMA_INT_IDX] = -_SIGMA_INT_PRIOR_SCALE * math.log(
             1.0 - u_sig * trunc + 1e-300
         )
+        if prior_spec is not None:
+            from darkhunter_sed.phot_sed_priors import (
+                unit_to_av,
+                unit_to_gaussian_param,
+                unit_to_plx,
+            )
+
+            # A_V prior (index 3): flat [0, Av_SF] or Truncated-Normal.
+            theta[_AV_PARAM_IDX] = unit_to_av(float(u[_AV_PARAM_IDX]), prior_spec.av)
+            # Parallax prior (index 4): flat ±5σ or Gaussian.
+            theta[_PLX_PARAM_IDX] = unit_to_plx(float(u[_PLX_PARAM_IDX]), prior_spec.plx)
+            # uberMS [Fe/H] and mass Gaussian priors (1-star only).
+            if prior_spec.uberms is not None:
+                ums = prior_spec.uberms
+                feh_lo, feh_hi = float(bound_list[_FEH_PARAM_IDX][0]), float(bound_list[_FEH_PARAM_IDX][1])
+                mass_lo, mass_hi = float(bound_list[1][0]), float(bound_list[1][1])
+                if ums.feh_mean is not None and ums.feh_sigma is not None:
+                    theta[_FEH_PARAM_IDX] = unit_to_gaussian_param(
+                        float(u[_FEH_PARAM_IDX]), ums.feh_mean, ums.feh_sigma, feh_lo, feh_hi
+                    )
+                if ums.mass_mean is not None and ums.mass_sigma is not None:
+                    theta[1] = unit_to_gaussian_param(
+                        float(u[1]), ums.mass_mean, ums.mass_sigma, mass_lo, mass_hi
+                    )
         return theta
 
     def loglike(theta: NDArray[np.floating]) -> float:
@@ -515,9 +562,13 @@ def fit_1star_dynesty(
         if not math.isfinite(lnl):
             return _LOGLIKE_FLOOR
         # Gaia parallax Gaussian constraint: theta[5] is parallax_mas directly.
-        for pr in plx_rows:
-            resid = (float(theta[_PLX_PARAM_IDX]) - pr.mag) / pr.err
-            lnl += -0.5 * resid * resid
+        # Skipped when prior_spec.plx_in_prior=True (Gaussian prior already encodes
+        # the Gaia astrometry; adding it again here would double-count it).
+        _plx_in_prior = prior_spec is not None and prior_spec.plx_in_prior
+        if not _plx_in_prior:
+            for pr in plx_rows:
+                resid = (float(theta[_PLX_PARAM_IDX]) - pr.mag) / pr.err
+                lnl += -0.5 * resid * resid
         # Gaia GSP-Phot MH: photometrically derived, errors inflated like Teff/logg.
         for mr in mh_rows:
             resid = (float(theta[_FEH_PARAM_IDX]) - mr.mag) / (mr.err * _GAIA_PHOT_CONSTRAINT_ERR_SCALE)
@@ -688,6 +739,7 @@ def run_1star_fit(
     phoenix_grid: PhoenixGrid | None = None,
     synth_phot: SynthPhotFn | None = None,
     bounds: OneStarPriorBounds | None = None,
+    prior_spec: Any | None = None,
     out_dir: Path | str | None = None,
     nlive: int = 100,
     maxiter: int | None = None,
@@ -706,6 +758,9 @@ def run_1star_fit(
 
     Parameters
     ----------
+    prior_spec :
+        :class:`~darkhunter_sed.phot_sed_priors.PhotSedPriorSpec`; forwarded to
+        :func:`fit_1star_dynesty`.
     dlogz, sample, bound, nworkers, jit_warmup, spec_stride, print_progress :
         Forwarded to :func:`fit_1star_dynesty`; see that function for details.
 
@@ -717,6 +772,7 @@ def run_1star_fit(
         phoenix_grid=phoenix_grid,
         synth_phot=synth_phot,
         bounds=bounds,
+        prior_spec=prior_spec,
         nlive=nlive,
         maxiter=maxiter,
         seed=seed,
@@ -835,6 +891,7 @@ def fit_2star_dynesty(
     phoenix_grid: PhoenixGrid | None = None,
     synth_2star: SynthPhot2StarFn | None = None,
     bounds: TwoStarPriorBounds | None = None,
+    prior_spec: Any | None = None,
     nlive: int = 100,
     maxiter: int | None = None,
     seed: int | None = 42,
@@ -862,6 +919,10 @@ def fit_2star_dynesty(
         Forward model; one of them required.
     bounds :
         Uniform prior bounds; default is :class:`TwoStarPriorBounds`.
+    prior_spec :
+        :class:`~darkhunter_sed.phot_sed_priors.PhotSedPriorSpec`; when
+        provided, overrides A_V bounds (to ``[0, Av_SF]`` or Gaussian) and
+        parallax bounds.  ``uberms`` is ignored for 2-star (1-star only).
     nlive, maxiter, seed, dlogz, sample, bound, nworkers, jit_warmup,
     spec_stride, print_progress :
         Dynesty / performance controls; see :func:`fit_1star_dynesty`.
@@ -879,7 +940,7 @@ def fit_2star_dynesty(
     ------
     ``M₁ ≥ M₂`` enforced as a ``−∞`` likelihood gate (not a prior boundary).
     No coeval EEP₂ solution → ``−∞`` likelihood (logged, not raised, inside
-    dynesty). Uniform priors only.
+    dynesty).
     """
     import multiprocessing
 
@@ -888,6 +949,16 @@ def fit_2star_dynesty(
     if not rows:
         raise ValueError("rows must be non-empty")
     prior = bounds if bounds is not None else TwoStarPriorBounds()
+    if prior_spec is not None:
+        prior = TwoStarPriorBounds(
+            eep1=prior.eep1,
+            mass1=prior.mass1,
+            mass2=prior.mass2,
+            feh=prior.feh,
+            afe=prior.afe,
+            a_v=(prior_spec.av.av_lo, prior_spec.av.av_hi),
+            parallax_mas=(prior_spec.plx.plx_lo, prior_spec.plx.plx_hi),
+        )
     bound_list = prior.as_list()
     bands = [r.band for r in rows]
     ndim = len(TWO_STAR_PARAM_NAMES)
@@ -923,8 +994,18 @@ def fit_2star_dynesty(
         except Exception:
             pass
 
+    # TWO_STAR_PARAM_NAMES order: eep1, mass1, mass2, feh, afe, a_v, parallax_mas
+    _2S_AV_IDX = 5
+    _2S_PLX_IDX = 6
+
     def prior_transform(u: NDArray[np.floating]) -> NDArray[np.float64]:
-        return _unit_cube_to_bounds(u, bound_list)
+        theta = _unit_cube_to_bounds(u, bound_list)
+        if prior_spec is not None:
+            from darkhunter_sed.phot_sed_priors import unit_to_av, unit_to_plx
+
+            theta[_2S_AV_IDX] = unit_to_av(float(u[_2S_AV_IDX]), prior_spec.av)
+            theta[_2S_PLX_IDX] = unit_to_plx(float(u[_2S_PLX_IDX]), prior_spec.plx)
+        return theta
 
     def loglike(theta: NDArray[np.floating]) -> float:
         try:
@@ -1093,6 +1174,7 @@ def run_2star_fit(
     phoenix_grid: PhoenixGrid | None = None,
     synth_2star: SynthPhot2StarFn | None = None,
     bounds: TwoStarPriorBounds | None = None,
+    prior_spec: Any | None = None,
     out_dir: Path | str | None = None,
     nlive: int = 100,
     maxiter: int | None = None,
@@ -1112,6 +1194,9 @@ def run_2star_fit(
 
     Parameters
     ----------
+    prior_spec :
+        :class:`~darkhunter_sed.phot_sed_priors.PhotSedPriorSpec`; forwarded to
+        :func:`fit_2star_dynesty`.
     eep2_xtol, spec_stride, print_progress :
         Forwarded to :func:`fit_2star_dynesty`.
 
@@ -1123,6 +1208,7 @@ def run_2star_fit(
         phoenix_grid=phoenix_grid,
         synth_2star=synth_2star,
         bounds=bounds,
+        prior_spec=prior_spec,
         nlive=nlive,
         maxiter=maxiter,
         seed=seed,
