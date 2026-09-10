@@ -53,8 +53,15 @@ _BAND_LABEL = {
 _BAND_ORDER = sorted(_BAND_WAV, key=_BAND_WAV.__getitem__)
 
 
-def _load(stem: Path) -> tuple[dict, np.ndarray, np.ndarray, list[str]]:
-    """Return (summary, samples, logl, param_names) from a fit stem."""
+_WD_PARAM_NAMES = ["teff_wd", "logg_wd", "Av", "parallax"]
+
+
+def _is_wd(d: np.lib.npyio.NpzFile) -> bool:
+    return "m_wd" in d.files
+
+
+def _load(stem: Path) -> tuple[dict, np.ndarray, np.ndarray | None, list[str], np.ndarray | None]:
+    """Return (summary, samples, logl_or_None, param_names, weights_or_None)."""
     npz_path = stem.parent / (stem.name + "_samples.npz")
     json_path = stem.parent / (stem.name + "_summary.json")
     if not npz_path.is_file():
@@ -63,26 +70,64 @@ def _load(stem: Path) -> tuple[dict, np.ndarray, np.ndarray, list[str]]:
         raise FileNotFoundError(json_path)
     d = np.load(npz_path)
     summary = json.loads(json_path.read_text())
-    return summary, d["samples"], d["logl"], list(d["param_names"])
+    if _is_wd(d):
+        # WD fit: samples are (N, 4) = (teff, logg, Av, parallax);
+        # derived M_WD and M_i are stored separately.
+        raw = np.asarray(d["samples"])
+        m_wd = np.asarray(d["m_wd"]).reshape(-1, 1)
+        m_i  = np.asarray(d["m_i"]).reshape(-1, 1)
+        weights = np.asarray(d["weights"])
+        # M_i is NaN for samples where IFMR is out of range (M_WD too high).
+        # Keep a full set (raw + M_WD) and a finite subset that includes M_i.
+        full = np.hstack([raw, m_wd, m_i])
+        mask = np.all(np.isfinite(full), axis=1)
+        frac_finite = mask.sum() / max(len(mask), 1)
+        if frac_finite < 0.5:
+            # Too few finite M_i (IFMR out of range for most samples): drop M_i
+            # from the corner to avoid degenerate 2D histograms.
+            samples = np.hstack([raw, m_wd])
+            weights = np.asarray(d["weights"])  # restore full weights
+            param_names = _WD_PARAM_NAMES + ["M_WD"]
+            if frac_finite > 0.0:
+                print(f"  WD: only {frac_finite:.0%} of samples have finite M_i "
+                      f"(IFMR in range); M_i excluded from corner.")
+        else:
+            samples = full[mask]
+            weights = weights[mask]
+            param_names = _WD_PARAM_NAMES + ["M_WD", "M_i"]
+        return summary, samples, None, param_names, weights
+    else:
+        return summary, d["samples"], d["logl"], list(d["param_names"]), None
 
 
 def _plot_corner(samples: np.ndarray, param_names: list[str],
-                 summary: dict, pdf_path: Path) -> None:
+                 summary: dict, pdf_path: Path,
+                 weights: np.ndarray | None = None) -> None:
     labels = param_names[:]
-    fig = corner.corner(
-        samples,
+    corner_kw: dict = dict(
         labels=labels,
         quantiles=[0.16, 0.5, 0.84],
         show_titles=True,
         title_kwargs={"fontsize": 9},
         label_kwargs={"fontsize": 9},
     )
+    if weights is not None:
+        corner_kw["weights"] = weights
+    fig = corner.corner(samples, **corner_kw)
+    # Title: WD uses logevidence; 1-star/2-star uses logz.
     gaia_id = summary.get("gaia_id", "")
-    model = summary.get("model", "")
-    logz, logz_err = summary.get("logz", 0.0), summary.get("logz_err", 0.0)
+    model = summary.get("model", summary.get("atm_type", ""))
+    if "logevidence" in summary:
+        logz = summary["logevidence"]
+        lnz_str = f"ln Z = {logz:.2f}"
+    else:
+        logz = summary.get("logz", 0.0)
+        logz_err = summary.get("logz_err", 0.0)
+        lnz_str = f"ln Z = {logz:.2f} ± {logz_err:.2f}"
+    ifmr = summary.get("ifmr", "")
+    title_model = f"{model}/{ifmr}" if ifmr else model
     fig.suptitle(
-        f"Gaia DR3 {gaia_id}  [{model}]  "
-        f"ln Z = {logz:.2f} ± {logz_err:.2f}",
+        f"Gaia DR3 {gaia_id}  [{title_model}]  {lnz_str}",
         fontsize=10,
     )
     fig.savefig(pdf_path, bbox_inches="tight")
@@ -184,17 +229,26 @@ def main(argv: list[str] | None = None) -> int:
     for stem in stems:
         print(f"\n{stem.name}")
         try:
-            summary, samples, logl, param_names = _load(stem)
+            summary, samples, logl, param_names, weights = _load(stem)
         except FileNotFoundError as e:
             print(f"  MISSING: {e}")
             continue
 
+        # WD fits store gaia_id in the parent directory name, not the summary.
         gaia_id = summary.get("gaia_id", "")
+        if not gaia_id:
+            # Walk up to find a numeric directory name (the Gaia ID).
+            for part in stem.parts[::-1]:
+                if part.isdigit():
+                    gaia_id = part
+                    break
+
         outdir = args.outdir or stem.parent
         outdir.mkdir(parents=True, exist_ok=True)
 
         _plot_corner(samples, param_names, summary,
-                     outdir / (stem.name + "_corner.pdf"))
+                     outdir / (stem.name + "_corner.pdf"),
+                     weights=weights)
 
         phot_path = args.phot_dir / f"{gaia_id}_phot.fits"
         _plot_sed(summary, phot_path,

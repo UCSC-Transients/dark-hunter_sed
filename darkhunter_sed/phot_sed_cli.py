@@ -10,6 +10,8 @@ import argparse
 import sys
 from pathlib import Path
 
+import numpy as np
+
 from darkhunter_sed.config import phot_sed_dir, photometry_dir
 from darkhunter_sed.misty_iso import load_misty_predictor, resolve_mist_nn_path
 from darkhunter_sed.phot_sed_fit import (
@@ -349,6 +351,19 @@ def default_phot_fits_path(gaia_id: str, phot_dir: Path | None = None) -> Path:
     return Path(root).expanduser().resolve() / f"{gaia_id}_phot.fits"
 
 
+def _resolve_bergeron_bands(wd_dir_arg: Path | None) -> frozenset[str]:
+    """Return Bergeron-available band names, or empty set if WD dir not found."""
+    wd_dir = _resolve_wd_dir(wd_dir_arg)
+    if wd_dir is None:
+        return frozenset()
+    try:
+        from darkhunter_sed.bergeron_wd import BergeronGrid
+        grid = BergeronGrid.from_dir(wd_dir, "DA")
+        return frozenset(grid.available_bands)
+    except Exception:
+        return frozenset()
+
+
 def main(argv: list[str] | None = None) -> int:
     """
     Run ``darkhunter-sed-phot``.
@@ -383,9 +398,35 @@ def main(argv: list[str] | None = None) -> int:
     all_rows = read_photometry_fits(phot_path)
 
     if args.model == "wd":
-        # WD model: pass all rows; wd_model.py filters to Bergeron-available bands.
-        rows = all_rows
-        mist_nn = predictor = grid_phx = bandpasses = common_kw = None  # unused
+        # WD+star model: needs MIST+PHOENIX for the MS companion component.
+        from darkhunter_sed.filters_synphot import BAND_REGISTRY
+        from darkhunter_sed.phot_sed_fit import _GAIA_CONSTRAINT_BANDS
+
+        _skip = {"WISE_W3", "WISE_W4"}
+        rows = [
+            r for r in all_rows
+            if r.band not in _skip
+            and (
+                r.band in BAND_REGISTRY
+                or r.band in _GAIA_CONSTRAINT_BANDS
+                # Bergeron-only bands (e.g. GALEX) not in BAND_REGISTRY:
+                # pass them through so the Bergeron component can use them.
+                or r.band in _resolve_bergeron_bands(args.wd_dir)
+            )
+        ]
+        if not any(r.band in BAND_REGISTRY or r.band in _GAIA_CONSTRAINT_BANDS for r in rows):
+            print(
+                f"No registered photometry bands in {phot_path}", file=sys.stderr
+            )
+            return 1
+        mist_nn  = resolve_mist_nn_path(args.mist_nn)
+        predictor = load_misty_predictor(mist_nn)
+        grid_phx  = PhoenixGrid(root=args.phoenix_dir)
+        bandpasses = load_bandpasses_for_bands(
+            [r.band for r in rows
+             if r.band not in _GAIA_CONSTRAINT_BANDS and r.band in BAND_REGISTRY]
+        )
+        common_kw = None  # WD path has its own keyword handling below
     else:
         # PHOENIX models: filter to synphot-registered bands only.
         from darkhunter_sed.filters_synphot import BAND_REGISTRY
@@ -464,7 +505,7 @@ def main(argv: list[str] | None = None) -> int:
             )
 
     elif args.model == "wd":
-        from darkhunter_sed.wd_model import WDPriorBounds, run_wd_fit
+        from darkhunter_sed.wd_model import WDStarPriorBounds, run_wd_plus_star_fit
 
         wd_dir = _resolve_wd_dir(args.wd_dir)
         if wd_dir is None:
@@ -477,44 +518,27 @@ def main(argv: list[str] | None = None) -> int:
 
         out_dir = args.outdir if args.outdir is not None else phot_sed_dir()
         wd_out = Path(out_dir) / gaia_id / "wd"
-        system_age_yr = float(args.system_age) * 1e9
-        wd_prior_bounds = WDPriorBounds()
 
-        wd_bb_bounds_obj: object | None = None
-        if args.ir_bb:
-            from darkhunter_sed.wd_model import BBPriorBounds as WDBBPriorBounds
-            wd_bb_bounds_obj = WDBBPriorBounds()
-
-        wd_results = run_wd_fit(
+        wd_results = run_wd_plus_star_fit(
             rows,
             wd_dir=wd_dir,
-            system_age_yr=system_age_yr,
-            prior_bounds=wd_prior_bounds,
-            bb_bounds=wd_bb_bounds_obj,
+            mist_predictor=predictor,
+            phoenix_grid=grid_phx,
+            bandpasses=bandpasses,
+            gaia_id=gaia_id,
             nlive=int(args.nlive),
             maxiter=args.maxiter,
             seed=int(args.seed),
+            dlogz=float(args.dlogz),
             outdir=wd_out,
         )
         for res in wd_results:
-            s = res.summary()
             print(
-                f"wd fit  atm={s['atm_type']}  ifmr={s['ifmr']}  "
-                f"lnZ={s['logevidence']:.2f}  "
-                f"M_WD={s['m_wd_median']:.3f}+{s['m_wd_hi']-s['m_wd_median']:.3f}"
-                f"-{s['m_wd_median']-s['m_wd_lo']:.3f}  "
-                f"extrap={s['extrap_mass']}"
+                f"wd+star fit  atm={res['atm_type']}  ifmr={res['ifmr']}  "
+                f"lnZ={res['logevidence']:.2f}  "
+                f"M_WD_med={float(np.nanmedian(res['m_wd_samples'])):.3f}"
             )
-        print(f"wd outputs: {wd_out}")
-        if args.plot:
-            _run_wd_diagnostics(
-                rows=rows,
-                wd_results=wd_results,
-                wd_prior_bounds=wd_prior_bounds,
-                wd_dir=wd_dir,
-                gaia_id=gaia_id,
-                out_dir=wd_out,
-            )
+        print(f"wd+star outputs: {wd_out}")
 
     else:
         print(f"Unsupported model: {args.model}", file=sys.stderr)
