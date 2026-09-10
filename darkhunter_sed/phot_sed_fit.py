@@ -26,6 +26,7 @@ from darkhunter_sed.misty_iso import (
 )
 from darkhunter_sed.phot_sed_io import FLAG_DETECTION, FLAG_UPPER_LIMIT, PhotRow
 from darkhunter_sed.phot_sed_models import (
+    BB_PARAM_NAMES,
     ONE_STAR_PARAM_NAMES,
     TWO_STAR_PARAM_NAMES,
     OneStarPrediction,
@@ -47,6 +48,31 @@ DEFAULT_SIGMA_INT_BOUNDS: tuple[float, float] = (0.0, 0.5)  # intrinsic scatter,
 # (12 000 K).  The lower bound 0.5 covers late K/M dwarfs; use
 # OneStarPriorBounds(mass=...) to override for targets outside this range.
 _FIT_MASS_BOUNDS: tuple[float, float] = (0.5, 2.0)
+
+
+DEFAULT_LOG10_T_BB_BOUNDS: tuple[float, float] = (2.0, 4.5)    # 100–31 623 K
+DEFAULT_LOG10_L_BB_BOUNDS: tuple[float, float] = (-6.0, 4.0)   # 10⁻⁶–10⁴ L☉
+
+
+@dataclass(frozen=True, slots=True)
+class BBPriorBounds:
+    """
+    Uniform prior bounds for the optional IR blackbody component.
+
+    Parameters
+    ----------
+    log10_t_bb :
+        ``(lo, hi)`` for log₁₀(T_bb / K).  Default: (2.0, 4.5) → 100–31 623 K.
+    log10_l_bb :
+        ``(lo, hi)`` for log₁₀(L_bb / L☉).  Default: (−6.0, 4.0) → 10⁻⁶–10⁴ L☉.
+    """
+
+    log10_t_bb: tuple[float, float] = DEFAULT_LOG10_T_BB_BOUNDS
+    log10_l_bb: tuple[float, float] = DEFAULT_LOG10_L_BB_BOUNDS
+
+    def as_list(self) -> list[tuple[float, float]]:
+        """Return bounds in :data:`~darkhunter_sed.phot_sed_models.BB_PARAM_NAMES` order."""
+        return [self.log10_t_bb, self.log10_l_bb]
 
 
 @dataclass(frozen=True, slots=True)
@@ -309,6 +335,7 @@ def fit_1star_dynesty(
     synth_phot: SynthPhotFn | None = None,
     bounds: OneStarPriorBounds | None = None,
     prior_spec: Any | None = None,
+    bb_bounds: BBPriorBounds | None = None,
     nlive: int = 100,
     maxiter: int | None = None,
     seed: int | None = 42,
@@ -436,9 +463,15 @@ def fit_1star_dynesty(
             sigma_int=prior.sigma_int,
         )
 
-    bound_list = prior.as_list()
+    use_bb = bb_bounds is not None
+    if use_bb:
+        bound_list = prior.as_list() + bb_bounds.as_list()  # type: ignore[union-attr]
+    else:
+        bound_list = prior.as_list()
     bands = [r.band for r in phot_rows]
-    ndim = len(ONE_STAR_PARAM_NAMES) + 1  # physical params + sigma_int
+    ndim = len(ONE_STAR_PARAM_NAMES) + 1 + (len(BB_PARAM_NAMES) if use_bb else 0)
+    _BB_T_IDX = len(ONE_STAR_PARAM_NAMES) + 1   # index of log10_T_bb when BB active
+    _BB_L_IDX = len(ONE_STAR_PARAM_NAMES) + 2   # index of log10_L_bb when BB active
 
     bps = bandpasses
     if bps is None and synth_phot is None:
@@ -545,6 +578,11 @@ def fit_1star_dynesty(
                 app_bol = abs_bol + 5.0 * math.log10(dist_pc) - 5.0 + _A_G_PER_AV * av
                 if not math.isfinite(app_bol) or abs(app_bol - _ref_g_mag) > _LUM_PREFILTER_MAG:
                     return _LOGLIKE_FLOOR
+        bb_t_k_: float | None = None
+        bb_l_lsun_: float | None = None
+        if use_bb:
+            bb_t_k_ = 10.0 ** float(theta[_BB_T_IDX])
+            bb_l_lsun_ = 10.0 ** float(theta[_BB_L_IDX])
         try:
             pred = predict_1star_phot(
                 theta[:_SIGMA_INT_IDX],  # physical params only
@@ -555,6 +593,8 @@ def fit_1star_dynesty(
                 systems=("ab",),
                 bandpasses=bps,
                 mag_system=mag_system,
+                bb_t_k=bb_t_k_,
+                bb_l_lsun=bb_l_lsun_,
             )
         except Exception:
             return _LOGLIKE_FLOOR
@@ -640,8 +680,9 @@ def fit_1star_dynesty(
     logz = float(res.logz[-1])
     logz_err = float(res.logzerr[-1]) if getattr(res, "logzerr", None) is not None else float("nan")
 
+    _param_names_1star = ONE_STAR_PARAM_NAMES + ("sigma_int",) + (BB_PARAM_NAMES if use_bb else ())
     return FitResult1Star(
-        param_names=ONE_STAR_PARAM_NAMES + ("sigma_int",),
+        param_names=_param_names_1star,
         samples=eq,
         logl=logl,
         logz=logz,
@@ -740,6 +781,7 @@ def run_1star_fit(
     synth_phot: SynthPhotFn | None = None,
     bounds: OneStarPriorBounds | None = None,
     prior_spec: Any | None = None,
+    bb_bounds: BBPriorBounds | None = None,
     out_dir: Path | str | None = None,
     nlive: int = 100,
     maxiter: int | None = None,
@@ -761,6 +803,9 @@ def run_1star_fit(
     prior_spec :
         :class:`~darkhunter_sed.phot_sed_priors.PhotSedPriorSpec`; forwarded to
         :func:`fit_1star_dynesty`.
+    bb_bounds :
+        When provided, activate the IR BB component (adds ``log10_T_bb``,
+        ``log10_L_bb`` free parameters).  See :class:`BBPriorBounds`.
     dlogz, sample, bound, nworkers, jit_warmup, spec_stride, print_progress :
         Forwarded to :func:`fit_1star_dynesty`; see that function for details.
 
@@ -773,6 +818,7 @@ def run_1star_fit(
         synth_phot=synth_phot,
         bounds=bounds,
         prior_spec=prior_spec,
+        bb_bounds=bb_bounds,
         nlive=nlive,
         maxiter=maxiter,
         seed=seed,
@@ -785,18 +831,26 @@ def run_1star_fit(
         spec_stride=spec_stride,
         print_progress=print_progress,
     )
+    with_bb = bb_bounds is not None
     bands = [r.band for r in rows if r.band not in _GAIA_CONSTRAINT_BANDS]
     bps = bandpasses
     if bps is None and synth_phot is None:
         bps = load_bandpasses_for_bands(bands)
+    bb_t_k_best: float | None = None
+    bb_l_lsun_best: float | None = None
+    if with_bb:
+        bb_t_k_best = 10.0 ** float(result.best_theta[_SIGMA_INT_IDX + 1])
+        bb_l_lsun_best = 10.0 ** float(result.best_theta[_SIGMA_INT_IDX + 2])
     best_pred = predict_1star_phot(
-        result.best_theta[:_SIGMA_INT_IDX],  # physical params only (no sigma_int)
+        result.best_theta[:_SIGMA_INT_IDX],  # physical params only (no sigma_int or BB)
         bands,
         mist_predictor=mist_predictor,
         phoenix_grid=phoenix_grid,
         synth_phot=synth_phot,
         systems=("ab",),
         bandpasses=bps,
+        bb_t_k=bb_t_k_best,
+        bb_l_lsun=bb_l_lsun_best,
     )
     paths = write_1star_outputs(
         result, gaia_id=gaia_id, out_dir=out_dir, best_pred=best_pred
@@ -892,6 +946,7 @@ def fit_2star_dynesty(
     synth_2star: SynthPhot2StarFn | None = None,
     bounds: TwoStarPriorBounds | None = None,
     prior_spec: Any | None = None,
+    bb_bounds: BBPriorBounds | None = None,
     nlive: int = 100,
     maxiter: int | None = None,
     seed: int | None = 42,
@@ -959,9 +1014,15 @@ def fit_2star_dynesty(
             a_v=(prior_spec.av.av_lo, prior_spec.av.av_hi),
             parallax_mas=(prior_spec.plx.plx_lo, prior_spec.plx.plx_hi),
         )
-    bound_list = prior.as_list()
+    use_bb_2star = bb_bounds is not None
+    if use_bb_2star:
+        bound_list = prior.as_list() + bb_bounds.as_list()  # type: ignore[union-attr]
+    else:
+        bound_list = prior.as_list()
     bands = [r.band for r in rows]
-    ndim = len(TWO_STAR_PARAM_NAMES)
+    ndim = len(TWO_STAR_PARAM_NAMES) + (len(BB_PARAM_NAMES) if use_bb_2star else 0)
+    _2S_BB_T_IDX = len(TWO_STAR_PARAM_NAMES)
+    _2S_BB_L_IDX = len(TWO_STAR_PARAM_NAMES) + 1
 
     bps = bandpasses
     if bps is None and synth_2star is None:
@@ -1008,9 +1069,14 @@ def fit_2star_dynesty(
         return theta
 
     def loglike(theta: NDArray[np.floating]) -> float:
+        bb_t_k_2s: float | None = None
+        bb_l_lsun_2s: float | None = None
+        if use_bb_2star:
+            bb_t_k_2s = 10.0 ** float(theta[_2S_BB_T_IDX])
+            bb_l_lsun_2s = 10.0 ** float(theta[_2S_BB_L_IDX])
         try:
             pred = predict_2star_phot(
-                theta,
+                theta[:len(TWO_STAR_PARAM_NAMES)],  # strip BB params before model call
                 bands,
                 mist_predictor=mist_predictor,
                 phoenix_grid=phoenix_grid,
@@ -1019,6 +1085,8 @@ def fit_2star_dynesty(
                 bandpasses=bps,
                 mag_system=mag_system,
                 eep2_xtol=eep2_xtol,
+                bb_t_k=bb_t_k_2s,
+                bb_l_lsun=bb_l_lsun_2s,
             )
         except Exception:
             return _LOGLIKE_FLOOR
@@ -1077,8 +1145,9 @@ def fit_2star_dynesty(
         float(res.logzerr[-1]) if getattr(res, "logzerr", None) is not None else float("nan")
     )
 
+    _param_names_2star = TWO_STAR_PARAM_NAMES + (BB_PARAM_NAMES if use_bb_2star else ())
     return FitResult2Star(
-        param_names=TWO_STAR_PARAM_NAMES,
+        param_names=_param_names_2star,
         samples=eq,
         logl=logl,
         logz=logz,
@@ -1175,6 +1244,7 @@ def run_2star_fit(
     synth_2star: SynthPhot2StarFn | None = None,
     bounds: TwoStarPriorBounds | None = None,
     prior_spec: Any | None = None,
+    bb_bounds: BBPriorBounds | None = None,
     out_dir: Path | str | None = None,
     nlive: int = 100,
     maxiter: int | None = None,
@@ -1197,6 +1267,8 @@ def run_2star_fit(
     prior_spec :
         :class:`~darkhunter_sed.phot_sed_priors.PhotSedPriorSpec`; forwarded to
         :func:`fit_2star_dynesty`.
+    bb_bounds :
+        When provided, activate the IR BB component.  See :class:`BBPriorBounds`.
     eep2_xtol, spec_stride, print_progress :
         Forwarded to :func:`fit_2star_dynesty`.
 
@@ -1209,6 +1281,7 @@ def run_2star_fit(
         synth_2star=synth_2star,
         bounds=bounds,
         prior_spec=prior_spec,
+        bb_bounds=bb_bounds,
         nlive=nlive,
         maxiter=maxiter,
         seed=seed,
@@ -1222,12 +1295,19 @@ def run_2star_fit(
         spec_stride=spec_stride,
         print_progress=print_progress,
     )
+    with_bb_2star = bb_bounds is not None
+    _n_phys_2star = len(TWO_STAR_PARAM_NAMES)
+    bb_t_k_best_2s: float | None = None
+    bb_l_lsun_best_2s: float | None = None
+    if with_bb_2star:
+        bb_t_k_best_2s = 10.0 ** float(result.best_theta[_n_phys_2star])
+        bb_l_lsun_best_2s = 10.0 ** float(result.best_theta[_n_phys_2star + 1])
     bands = [r.band for r in rows]
     bps = bandpasses
     if bps is None and synth_2star is None:
         bps = load_bandpasses_for_bands(bands)
     best_pred = predict_2star_phot(
-        result.best_theta,
+        result.best_theta[:_n_phys_2star],
         bands,
         mist_predictor=mist_predictor,
         phoenix_grid=phoenix_grid,
@@ -1235,6 +1315,8 @@ def run_2star_fit(
         systems=("ab",),
         bandpasses=bps,
         eep2_xtol=eep2_xtol,
+        bb_t_k=bb_t_k_best_2s,
+        bb_l_lsun=bb_l_lsun_best_2s,
     )
     paths = write_2star_outputs(
         result, gaia_id=gaia_id, out_dir=out_dir, best_pred=best_pred

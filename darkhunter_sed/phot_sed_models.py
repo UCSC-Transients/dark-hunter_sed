@@ -34,6 +34,9 @@ ONE_STAR_PARAM_NAMES: tuple[str, ...] = (
     "parallax",
 )
 
+# Extra free parameters appended to the model vector when --ir-bb is active.
+BB_PARAM_NAMES: tuple[str, ...] = ("log10_T_bb", "log10_L_bb")
+
 
 class SynthPhotFn(Protocol):
     """Injectable PHOENIX×F99×synphot callable for tests."""
@@ -172,6 +175,8 @@ def predict_1star_phot(
     systems: Sequence[str] = ("ab",),
     bandpasses: Mapping[str, object] | None = None,
     mag_system: str = "ab",
+    bb_t_k: float | None = None,
+    bb_l_lsun: float | None = None,
 ) -> OneStarPrediction:
     """
     1-star: ``EEP, M, [Fe/H], [α/Fe], Av, ϖ`` → predicted photometry.
@@ -192,6 +197,11 @@ def predict_1star_phot(
         Forwarded to PHOENIX synth.
     mag_system :
         Which key to pull from per-band dicts (``\"ab\"`` or ``\"vega\"``).
+    bb_t_k, bb_l_lsun :
+        Optional IR blackbody temperature (K) and luminosity (L☉).  Passed to
+        :func:`~darkhunter_sed.phoenix_grid.phoenix_synth_phot`; BB flux is
+        added to the stellar FLAM before F99.  Only used when ``phoenix_grid``
+        is provided (not with ``synth_phot`` injectable).
 
     Returns
     -------
@@ -200,8 +210,8 @@ def predict_1star_phot(
 
     Limits
     ------
-    IR BB, 2-star, and WD components are out of scope. Extinction is F99 R_V=3.1
-    inside :func:`phoenix_synth_phot` when using the grid path.
+    Extinction is F99 R_V=3.1 applied once to the combined stellar+BB SED.
+    The ``synth_phot`` injectable does not forward ``bb_t_k``/``bb_l_lsun``.
     """
     p = params if isinstance(params, OneStarParams) else OneStarParams.from_array(params)
     if p.a_v < 0.0:
@@ -244,6 +254,8 @@ def predict_1star_phot(
             distance_pc=distance_pc,
             systems=systems,
             bandpasses=bandpasses,
+            bb_t_k=bb_t_k,
+            bb_l_lsun=bb_l_lsun,
         )
 
     sys_key = mag_system.lower()
@@ -472,6 +484,8 @@ def predict_2star_phot(
     bandpasses: Mapping[str, object] | None = None,
     mag_system: str = "ab",
     eep2_xtol: float = 0.5,
+    bb_t_k: float | None = None,
+    bb_l_lsun: float | None = None,
 ) -> TwoStarPrediction:
     """
     2-star coeval: ``EEP₁, M₁, M₂, [Fe/H], [α/Fe], Aᵥ, ϖ`` → combined photometry.
@@ -493,6 +507,11 @@ def predict_2star_phot(
         Forwarded to the SED synthesis step.
     eep2_xtol :
         EEP tolerance for the coeval solver (passed to :func:`solve_eep2_for_age_match`).
+    bb_t_k, bb_l_lsun :
+        Optional IR blackbody temperature (K) and luminosity (L☉).  Passed to
+        :func:`~darkhunter_sed.phoenix_grid.phoenix_synth_phot_2star`; BB flux is
+        summed with the combined stellar FLAM before F99.  Only used when
+        ``phoenix_grid`` is provided (not with ``synth_2star`` injectable).
 
     Returns
     -------
@@ -507,9 +526,9 @@ def predict_2star_phot(
 
     Limits
     ------
-    Path-2 photometry order: dilute star 1 + dilute star 2 → **sum** on shared
-    bandpass-λ grid → **one** F99 application → synthesize mags.  Never stack
-    per-component magnitudes.
+    Path-2 photometry order: dilute star 1 + dilute star 2 [+ BB] → **sum** on
+    shared bandpass-λ grid → **one** F99 application → synthesize mags.  Never
+    stack per-component magnitudes.
     """
     from darkhunter_sed.phoenix_grid import phoenix_synth_phot_2star
 
@@ -575,6 +594,8 @@ def predict_2star_phot(
             distance_pc=distance_pc,
             systems=systems,
             bandpasses=bandpasses,
+            bb_t_k=bb_t_k,
+            bb_l_lsun=bb_l_lsun,
         )
 
     sys_key = mag_system.lower()
