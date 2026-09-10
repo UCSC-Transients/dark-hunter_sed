@@ -148,6 +148,56 @@ def _build_parser() -> argparse.ArgumentParser:
             "and model-comparison bar chart.  Requires matplotlib >= 3.8."
         ),
     )
+    # Prior mode flags (Issue #48)
+    p.add_argument(
+        "--prior-dust",
+        action="store_true",
+        default=False,
+        help=(
+            "Use a 3D dust-map Gaussian A_V prior (Bayestar/Edenhofer/Chen) with a "
+            "hard cap at Av_SF (CSFD/S&F LOS, R_V=3.1 F99).  Default: flat Uniform[0, Av_SF]."
+        ),
+    )
+    p.add_argument(
+        "--prior-gaia-vac",
+        action="store_true",
+        default=False,
+        help=(
+            "Use a Gaussian parallax prior centred on the Gaia astrometric value "
+            "(removes the parallax likelihood constraint to avoid double-counting)."
+        ),
+    )
+    p.add_argument(
+        "--prior-uberms",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help=(
+            "Path to a uberMS spectral-fit JSON with 'feh'/'feh_sigma' and/or "
+            "'mass'/'mass_sigma'.  Applied as Gaussian priors to the 1-star model only; "
+            "silently ignored (with a warning) for 2-star and wd."
+        ),
+    )
+    p.add_argument(
+        "--ra-deg",
+        type=float,
+        default=None,
+        metavar="DEG",
+        help=(
+            "Target right ascension (degrees, ICRS) for CSFD Av_SF query.  "
+            "When omitted, derived from Gaia TAP query using the source id."
+        ),
+    )
+    p.add_argument(
+        "--dec-deg",
+        type=float,
+        default=None,
+        metavar="DEG",
+        help=(
+            "Target declination (degrees, ICRS) for CSFD Av_SF query.  "
+            "When omitted, derived from Gaia TAP query using the source id."
+        ),
+    )
     return p
 
 
@@ -177,6 +227,89 @@ def _resolve_wd_dir(cli_path: Path | None) -> Path | None:
             return p
     p = Path.home() / "stellar" / "wd"
     return p if p.is_dir() else None
+
+
+def _resolve_ra_dec(
+    gaia_id: str,
+    *,
+    ra_deg: float | None,
+    dec_deg: float | None,
+) -> tuple[float | None, float | None]:
+    """Resolve RA/Dec from CLI args or Gaia TAP query.
+
+    Falls back to ``(None, None)`` on failure (caller uses av_hi_fallback).
+    """
+    import math
+
+    if ra_deg is not None and dec_deg is not None:
+        if math.isfinite(ra_deg) and math.isfinite(dec_deg):
+            return ra_deg, dec_deg
+    try:
+        from darkhunter_sed.stellar_data import query_gaia_stellar_priors
+
+        priors = query_gaia_stellar_priors(gaia_id)
+        ra = priors.get("RA")
+        dec = priors.get("Dec")
+        if ra is not None and dec is not None and math.isfinite(float(ra)) and math.isfinite(float(dec)):
+            return float(ra), float(dec)
+    except Exception as exc:
+        import sys
+
+        print(f"Warning: could not resolve RA/Dec for {gaia_id}: {exc}", file=sys.stderr)
+    return None, None
+
+
+def _build_prior_spec_for_rows(
+    gaia_id: str,
+    rows: list,
+    *,
+    model: str,
+    prior_dust: bool,
+    prior_gaia_vac: bool,
+    uberms_path: Path | None,
+    ra_deg: float | None,
+    dec_deg: float | None,
+):
+    """Build PhotSedPriorSpec from CLI args and Gaia parallax row.
+
+    Returns ``None`` when no parallax row is found and no prior flags are set
+    (keeps backward-compatible behaviour for callers that pass ``bounds``).
+    """
+    import math
+
+    from darkhunter_sed.phot_sed_fit import _PLX_BAND
+    from darkhunter_sed.phot_sed_priors import build_prior_spec
+
+    plx_rows = [r for r in rows if r.band == _PLX_BAND]
+    if not plx_rows:
+        if not (prior_dust or prior_gaia_vac or uberms_path):
+            return None
+        # No parallax row — use fallback defaults.
+        plx_obs, plx_err = 5.0, 0.5  # ~200 pc placeholder; CSFD still applies
+    else:
+        plx_obs = float(plx_rows[0].mag)
+        plx_err = float(plx_rows[0].err)
+
+    ra, dec = _resolve_ra_dec(gaia_id, ra_deg=ra_deg, dec_deg=dec_deg)
+    if ra is None or dec is None:
+        # Cannot query CSFD; use fallback Av_SF
+        if not (prior_dust or prior_gaia_vac or uberms_path):
+            return None
+        ra, dec = 0.0, 0.0  # galactic l,b will be arbitrary; av_hi_fallback kicks in
+
+    d_pc = 1000.0 / plx_obs if math.isfinite(plx_obs) and plx_obs > 0 else None
+
+    return build_prior_spec(
+        ra,
+        dec,
+        plx_obs,
+        plx_err,
+        prior_dust=prior_dust,
+        prior_gaia_vac=prior_gaia_vac,
+        uberms_path=uberms_path,
+        model=model,
+        d_pc=d_pc,
+    )
 
 
 def default_phot_fits_path(gaia_id: str, phot_dir: Path | None = None) -> Path:
@@ -286,10 +419,20 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     if args.model in ("1star", "2star"):
+        prior_spec = _build_prior_spec_for_rows(
+            gaia_id,
+            rows,
+            model=args.model,
+            prior_dust=bool(args.prior_dust),
+            prior_gaia_vac=bool(args.prior_gaia_vac),
+            uberms_path=args.prior_uberms,
+            ra_deg=args.ra_deg,
+            dec_deg=args.dec_deg,
+        )
         if args.model == "1star":
-            result, paths = run_1star_fit(rows, bounds=None, **common_kw)
+            result, paths = run_1star_fit(rows, bounds=None, prior_spec=prior_spec, **common_kw)
         else:
-            result, paths = run_2star_fit(rows, bounds=TwoStarPriorBounds(), **common_kw)
+            result, paths = run_2star_fit(rows, bounds=TwoStarPriorBounds(), prior_spec=prior_spec, **common_kw)
         print(
             f"{args.model} fit gaia_id={gaia_id}  lnZ={result.logz:.3f}±{result.logz_err:.3f}  "
             f"BIC={result.bic:.3f}  lnL_max={result.ln_l_max:.3f}"
