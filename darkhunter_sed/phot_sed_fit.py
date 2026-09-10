@@ -1066,6 +1066,12 @@ def fit_2star_dynesty(
 
             theta[_2S_AV_IDX] = unit_to_av(float(u[_2S_AV_IDX]), prior_spec.av)
             theta[_2S_PLX_IDX] = unit_to_plx(float(u[_2S_PLX_IDX]), prior_spec.plx)
+        # Enforce M₁ ≥ M₂ by sorting the two mass parameters (indices 1 and 2
+        # in TWO_STAR_PARAM_NAMES).  Without this, ~50 % of the prior volume has
+        # M₂ > M₁, which returns _LOGLIKE_FLOOR for every sample in that half-
+        # space and can leave all live points on the likelihood plateau.
+        if theta[2] > theta[1]:
+            theta[1], theta[2] = theta[2], theta[1]
         return theta
 
     def loglike(theta: NDArray[np.floating]) -> float:
@@ -1306,18 +1312,22 @@ def run_2star_fit(
     bps = bandpasses
     if bps is None and synth_2star is None:
         bps = load_bandpasses_for_bands(bands)
-    best_pred = predict_2star_phot(
-        result.best_theta[:_n_phys_2star],
-        bands,
-        mist_predictor=mist_predictor,
-        phoenix_grid=phoenix_grid,
-        synth_2star=synth_2star,
-        systems=("ab",),
-        bandpasses=bps,
-        eep2_xtol=eep2_xtol,
-        bb_t_k=bb_t_k_best_2s,
-        bb_l_lsun=bb_l_lsun_best_2s,
-    )
+    try:
+        best_pred = predict_2star_phot(
+            result.best_theta[:_n_phys_2star],
+            bands,
+            mist_predictor=mist_predictor,
+            phoenix_grid=phoenix_grid,
+            synth_2star=synth_2star,
+            systems=("ab",),
+            bandpasses=bps,
+            eep2_xtol=eep2_xtol,
+            bb_t_k=bb_t_k_best_2s,
+            bb_l_lsun=bb_l_lsun_best_2s,
+        )
+    except Exception as _exc:
+        print(f"  [2star] best_pred failed ({_exc}); summary will lack best_mags.")
+        best_pred = None
     paths = write_2star_outputs(
         result, gaia_id=gaia_id, out_dir=out_dir, best_pred=best_pred
     )
