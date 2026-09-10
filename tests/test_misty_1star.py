@@ -181,7 +181,7 @@ def test_fit_1star_dynesty_synthetic(tmp_path: Path) -> None:
         maxiter=250,
         seed=0,
     )
-    assert result.n_free == len(ONE_STAR_PARAM_NAMES)
+    assert result.n_free == len(ONE_STAR_PARAM_NAMES) + 1  # +1 for sigma_int
     assert math.isfinite(result.logz)
     assert math.isfinite(result.bic)
     assert result.ln_l_max > -np.inf
@@ -208,7 +208,7 @@ def test_fit_1star_dynesty_synthetic(tmp_path: Path) -> None:
     )
     assert result.ln_l_max > ln_wrong
     assert result.samples.ndim == 2
-    assert result.samples.shape[1] == len(ONE_STAR_PARAM_NAMES)
+    assert result.samples.shape[1] == len(ONE_STAR_PARAM_NAMES) + 1  # +1 for sigma_int
 
 def test_phot_sed_dir_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("DARKHUNTER_SED_PHOT_SED_DIR", str(tmp_path / "ps"))

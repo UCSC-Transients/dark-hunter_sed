@@ -41,6 +41,7 @@ DEFAULT_FEH_BOUNDS: tuple[float, float] = (-2.0, 0.5)
 DEFAULT_AFE_BOUNDS: tuple[float, float] = (-0.2, 0.6)
 DEFAULT_AV_BOUNDS: tuple[float, float] = (0.0, 5.0)
 DEFAULT_PARALLAX_BOUNDS: tuple[float, float] = (0.1, 100.0)  # mas
+DEFAULT_SIGMA_INT_BOUNDS: tuple[float, float] = (0.0, 0.5)  # intrinsic scatter, mag
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,10 +61,11 @@ class OneStarPriorBounds:
     afe: tuple[float, float] = DEFAULT_AFE_BOUNDS
     a_v: tuple[float, float] = DEFAULT_AV_BOUNDS
     parallax_mas: tuple[float, float] = DEFAULT_PARALLAX_BOUNDS
+    sigma_int: tuple[float, float] = DEFAULT_SIGMA_INT_BOUNDS
 
     def as_list(self) -> list[tuple[float, float]]:
-        """Return bounds in dynesty parameter order."""
-        return [self.eep, self.mass, self.feh, self.afe, self.a_v, self.parallax_mas]
+        """Return bounds in dynesty parameter order (physical params + sigma_int)."""
+        return [self.eep, self.mass, self.feh, self.afe, self.a_v, self.parallax_mas, self.sigma_int]
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,6 +145,8 @@ def bic_from_max_likelihood(*, ln_l_max: float, n_free: int, n_data: int) -> flo
 def photometry_loglike(
     pred_mags: Mapping[str, float],
     rows: Sequence[PhotRow],
+    *,
+    sigma_int: float = 0.0,
 ) -> float:
     """
     Gaussian photometry log-likelihood with 3σ upper-limit treatment.
@@ -153,31 +157,44 @@ def photometry_loglike(
         Model magnitudes keyed by band name.
     rows :
         Observed :class:`PhotRow` list (detections and/or ULs).
+    sigma_int :
+        Intrinsic scatter (mag) added in quadrature to each band's effective
+        error alongside the fixed :data:`_PHOT_ERR_FLOOR`.  Sampled as a free
+        parameter by dynesty; pass ``0.0`` for direct evaluation.
 
     Returns
     -------
     float
         Sum of per-band contributions (natural log).
 
-    Limits
-    ------
-    - Detections (``flag=0``): ``-0.5 * ((m_obs - m_mod)/err)^2 - ln(err*sqrt(2π))``.
-    - Upper limits (``flag=1``): if ``m_mod < m_ul`` (model brighter than limit),
-      apply the same Gaussian penalty vs ``m_ul``; otherwise contribute ``0``.
-    - Missing model bands raise ``KeyError``.
+    Notes
+    -----
+    Effective error per band:
+    ``err_eff = sqrt(err_phot^2 + _PHOT_ERR_FLOOR^2 + sigma_int^2)``.
+
+    - Detections (``flag=0``): ``-0.5*((obs-mod)/err_eff)^2 - ln(err_eff*sqrt(2π))``.
+    - Upper limits (``flag=1``): penalty only when model is brighter than the limit.
+    - Sentinel model (``m_mod >= 90``): photospheric model predicts no flux;
+      detection may indicate a non-photospheric source (WD companion, accretion).
+      Skipped for the 1-star model — the 2-star / WD model handles it.
     """
     ln_norm = math.log(math.sqrt(2.0 * math.pi))
+    sigma_int_sq = float(sigma_int) ** 2
     total = 0.0
     for row in rows:
         m_mod = float(pred_mags[row.band])
-        err = float(row.err)
-        if err <= 0.0 or not math.isfinite(err):
+        err_raw = float(row.err)
+        if err_raw <= 0.0 or not math.isfinite(err_raw):
             raise ValueError(f"Invalid err for band {row.band}")
         if not math.isfinite(m_mod):
-            # NaN/inf model magnitude (e.g. zero-flux prediction): treat as
-            # very faint (99 mag) so detections get a large finite penalty.
             m_mod = 99.0
+        err = math.sqrt(err_raw**2 + _PHOT_ERR_FLOOR**2 + sigma_int_sq)
         if row.flag == FLAG_DETECTION:
+            if m_mod >= 90.0:
+                # Photospheric model predicts no flux; detection may be a WD
+                # companion or accretion.  The 1-star model cannot explain this
+                # band so we skip it here; the 2-star / WD model handles it.
+                continue
             resid = (float(row.mag) - m_mod) / err
             total += -0.5 * resid * resid - math.log(err) - ln_norm
         elif row.flag == FLAG_UPPER_LIMIT:
@@ -245,6 +262,9 @@ _LOGG_BAND = "Gaia_logg"
 _MH_BAND = "Gaia_MH"
 _FEH_PARAM_IDX = 2  # feh is the 3rd element of OneStarParams (0-indexed)
 _GAIA_CONSTRAINT_BANDS = frozenset({_PLX_BAND, _TEFF_BAND, _LOGG_BAND, _MH_BAND})
+
+_PHOT_ERR_FLOOR: float = 0.02  # mag — systematic floor (PHOENIX model + zero-point)
+_SIGMA_INT_IDX: int = len(ONE_STAR_PARAM_NAMES)  # index of sigma_int in the 7-D theta
 
 
 def fit_1star_dynesty(
@@ -369,7 +389,7 @@ def fit_1star_dynesty(
 
     bound_list = prior.as_list()
     bands = [r.band for r in phot_rows]
-    ndim = len(ONE_STAR_PARAM_NAMES)
+    ndim = len(ONE_STAR_PARAM_NAMES) + 1  # physical params + sigma_int
 
     bps = bandpasses
     if bps is None and synth_phot is None:
@@ -390,7 +410,7 @@ def fit_1star_dynesty(
         _mid = np.array([0.5 * (lo + hi) for lo, hi in _warmup_bounds], dtype=np.float64)
         try:
             predict_1star_phot(
-                _mid,
+                _mid[:_SIGMA_INT_IDX],  # physical params only (no sigma_int)
                 bands,
                 mist_predictor=mist_predictor,
                 phoenix_grid=phoenix_grid,
@@ -406,9 +426,10 @@ def fit_1star_dynesty(
         return _unit_cube_to_bounds(u, bound_list)
 
     def loglike(theta: NDArray[np.floating]) -> float:
+        sigma_int = float(theta[_SIGMA_INT_IDX])
         try:
             pred = predict_1star_phot(
-                theta,
+                theta[:_SIGMA_INT_IDX],  # physical params only
                 bands,
                 mist_predictor=mist_predictor,
                 phoenix_grid=phoenix_grid,
@@ -419,7 +440,7 @@ def fit_1star_dynesty(
             )
         except Exception:
             return -np.inf
-        lnl = photometry_loglike(pred.mags, phot_rows)
+        lnl = photometry_loglike(pred.mags, phot_rows, sigma_int=sigma_int)
         # Gaia parallax Gaussian constraint: theta[5] is parallax_mas directly.
         for pr in plx_rows:
             resid = (float(theta[_PLX_PARAM_IDX]) - pr.mag) / pr.err
@@ -489,7 +510,7 @@ def fit_1star_dynesty(
     logz_err = float(res.logzerr[-1]) if getattr(res, "logzerr", None) is not None else float("nan")
 
     return FitResult1Star(
-        param_names=ONE_STAR_PARAM_NAMES,
+        param_names=ONE_STAR_PARAM_NAMES + ("sigma_int",),
         samples=eq,
         logl=logl,
         logz=logz,
@@ -633,7 +654,7 @@ def run_1star_fit(
     if bps is None and synth_phot is None:
         bps = load_bandpasses_for_bands(bands)
     best_pred = predict_1star_phot(
-        result.best_theta,
+        result.best_theta[:_SIGMA_INT_IDX],  # physical params only (no sigma_int)
         bands,
         mist_predictor=mist_predictor,
         phoenix_grid=phoenix_grid,

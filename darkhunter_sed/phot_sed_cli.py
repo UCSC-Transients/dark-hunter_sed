@@ -244,7 +244,7 @@ def main(argv: list[str] | None = None) -> int:
             if r.band not in _skip
             and (r.band in BAND_REGISTRY or r.band in _GAIA_CONSTRAINT_BANDS)
         ]
-        if not rows:
+        if not any(r.band in BAND_REGISTRY for r in rows):
             print(
                 f"No Path-2-registered photometry bands in {phot_path}",
                 file=sys.stderr,
@@ -254,7 +254,9 @@ def main(argv: list[str] | None = None) -> int:
         mist_nn = resolve_mist_nn_path(args.mist_nn)
         predictor = load_misty_predictor(mist_nn)
         grid_phx = PhoenixGrid(root=args.phoenix_dir)
-        bandpasses = load_bandpasses_for_bands([r.band for r in rows])
+        bandpasses = load_bandpasses_for_bands(
+            [r.band for r in rows if r.band not in _GAIA_CONSTRAINT_BANDS]
+        )
         out_dir = args.outdir if args.outdir is not None else phot_sed_dir()
 
         common_kw = dict(
