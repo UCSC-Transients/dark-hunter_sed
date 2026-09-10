@@ -24,12 +24,12 @@ from darkhunter_sed.misty_iso import (
 )
 from darkhunter_sed.phoenix_grid import PhoenixGrid, phoenix_synth_phot
 
-# Free-parameter order for 1-star dynesty (locked Path-2 plan).
+# Free-parameter order for 1-star dynesty.
+# aFe is fixed at 0.0 (PHOENIX alpha grid is sparse for non-zero alpha).
 ONE_STAR_PARAM_NAMES: tuple[str, ...] = (
     "EEP",
     "M",
     "FeH",
-    "aFe",
     "Av",
     "parallax",
 )
@@ -101,15 +101,15 @@ class OneStarParams:
             eep=float(arr[0]),
             mass=float(arr[1]),
             feh=float(arr[2]),
-            afe=float(arr[3]),
-            a_v=float(arr[4]),
-            parallax_mas=float(arr[5]),
+            afe=0.0,  # fixed; PHOENIX alpha grid is sparse for non-zero alpha
+            a_v=float(arr[3]),
+            parallax_mas=float(arr[4]),
         )
 
     def as_array(self) -> NDArray[np.float64]:
-        """Return parameters as a length-6 float64 vector."""
+        """Return free parameters as a length-5 float64 vector (aFe excluded; fixed at 0)."""
         return np.array(
-            [self.eep, self.mass, self.feh, self.afe, self.a_v, self.parallax_mas],
+            [self.eep, self.mass, self.feh, self.a_v, self.parallax_mas],
             dtype=np.float64,
         )
 
