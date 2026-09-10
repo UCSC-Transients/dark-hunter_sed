@@ -313,6 +313,15 @@ def query_catalogs(source_id, radius=3, ps1_vizier_epoch_jyear=PS1_VIZIER_DEFAUL
         photometry.append(("Gaia_parallax", plx, plx_err))
 
     # Gaia GSP-Phot astrophysical parameters as Gaussian constraint rows.
+    # The formal GSP-Phot statistical uncertainties (~5 K Teff, ~0.004 logg)
+    # are far smaller than the pipeline's external accuracy (~150 K, ~0.15 dex).
+    # Add systematic floors in quadrature so dynesty can actually find the
+    # posterior without every off-target sample getting a catastrophic penalty.
+    _GSPPHOT_SYS_FLOOR = {
+        "Gaia_Teff": 150.0,   # K — GSP-Phot external accuracy, Andrae+2023
+        "Gaia_logg": 0.15,    # dex
+        "Gaia_MH":   0.10,    # dex
+    }
     for band_name, col, col_lo, col_hi in (
         ("Gaia_Teff", "teff_gspphot", "teff_gspphot_lower", "teff_gspphot_upper"),
         ("Gaia_logg", "logg_gspphot", "logg_gspphot_lower", "logg_gspphot_upper"),
@@ -322,7 +331,9 @@ def query_catalogs(source_id, radius=3, ps1_vizier_epoch_jyear=PS1_VIZIER_DEFAUL
         lo = _gaia_scalar(row0, col_lo)
         hi = _gaia_scalar(row0, col_hi)
         if math.isfinite(val) and math.isfinite(lo) and math.isfinite(hi):
-            err = max(val - lo, hi - val)
+            stat_err = max(val - lo, hi - val)
+            sys_floor = _GSPPHOT_SYS_FLOOR[band_name]
+            err = math.sqrt(stat_err**2 + sys_floor**2)
             if err > 0:
                 photometry.append((band_name, val, err))
 
