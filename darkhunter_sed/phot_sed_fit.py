@@ -372,24 +372,16 @@ def fit_1star_dynesty(
     if not phot_rows:
         raise ValueError("rows contains only Gaia constraints; need photometric bands too")
 
-    # Tighten flat priors from Gaia constraints so dynesty doesn't waste live
-    # points in regions that have essentially zero likelihood.
+    # Tighten parallax prior only — Gaia parallax is astrometric (independent).
+    # GSP-Phot MH/Teff/logg are photometrically derived, so using them to shrink
+    # the prior would bias results; they appear only as down-weighted likelihood terms.
     prior = bounds if bounds is not None else OneStarPriorBounds()
-    if bounds is None and (plx_rows or mh_rows):
-        tight_kw: dict[str, tuple[float, float]] = {}
-        if plx_rows:
-            plx_obs = plx_rows[0].mag
-            plx_err = plx_rows[0].err
-            lo = max(DEFAULT_PARALLAX_BOUNDS[0], plx_obs - _PLX_SIGMA_CLIP * plx_err)
-            hi = min(DEFAULT_PARALLAX_BOUNDS[1], plx_obs + _PLX_SIGMA_CLIP * plx_err)
-            tight_kw["parallax_mas"] = (lo, hi)
-        if mh_rows:
-            mh_obs = mh_rows[0].mag
-            mh_err = mh_rows[0].err
-            lo_f = max(DEFAULT_FEH_BOUNDS[0], mh_obs - _PLX_SIGMA_CLIP * mh_err)
-            hi_f = min(DEFAULT_FEH_BOUNDS[1], mh_obs + _PLX_SIGMA_CLIP * mh_err)
-            tight_kw["feh"] = (lo_f, hi_f)
-        prior = OneStarPriorBounds(**tight_kw)
+    if bounds is None and plx_rows:
+        plx_obs = plx_rows[0].mag
+        plx_err = plx_rows[0].err
+        lo = max(DEFAULT_PARALLAX_BOUNDS[0], plx_obs - _PLX_SIGMA_CLIP * plx_err)
+        hi = min(DEFAULT_PARALLAX_BOUNDS[1], plx_obs + _PLX_SIGMA_CLIP * plx_err)
+        prior = OneStarPriorBounds(parallax_mas=(lo, hi))
 
     bound_list = prior.as_list()
     bands = [r.band for r in phot_rows]
@@ -449,9 +441,9 @@ def fit_1star_dynesty(
         for pr in plx_rows:
             resid = (float(theta[_PLX_PARAM_IDX]) - pr.mag) / pr.err
             lnl += -0.5 * resid * resid
-        # Gaia GSP-Phot FeH constraint: theta[2] is feh directly.
+        # Gaia GSP-Phot MH: photometrically derived, errors inflated like Teff/logg.
         for mr in mh_rows:
-            resid = (float(theta[_FEH_PARAM_IDX]) - mr.mag) / mr.err
+            resid = (float(theta[_FEH_PARAM_IDX]) - mr.mag) / (mr.err * _GAIA_PHOT_CONSTRAINT_ERR_SCALE)
             lnl += -0.5 * resid * resid
         # Gaia GSP-Phot Teff/logg: photometrically derived, so partially circular
         # with our own photometric fit.  Errors inflated by _GAIA_PHOT_CONSTRAINT_ERR_SCALE
