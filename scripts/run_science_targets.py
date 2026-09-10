@@ -295,8 +295,8 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         description="Diagnostic SED fits for three science programs."
     )
-    ap.add_argument("--nlive",  type=int,   default=200,
-                    help="Dynesty live points (default 200)")
+    ap.add_argument("--nlive",  type=int,   default=500,
+                    help="Dynesty live points (default 500)")
     ap.add_argument("--dlogz",  type=float, default=0.5,
                     help="Dynesty dlogz stopping criterion (default 0.5)")
     ap.add_argument("--outdir", type=Path,

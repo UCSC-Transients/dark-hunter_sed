@@ -186,21 +186,31 @@ def _append_ps1_from_gaia_archive(row, photometry):
     """
     Prefer PS1 mean PSF AB mags from ``gaiadr2.panstarrs1_original_valid`` via
     ``gaiadr3.panstarrs1_best_neighbour`` (Gaia DR3 cross-match).
+
+    Quality check: require num_sigma_clipped >= 2 (at least 2 good epochs
+    contributed to the mean; 0 or 1 indicates an unreliable measurement).
     """
     bands = [
-        ("PS_g", "g_mean_psf_mag", "g_mean_psf_mag_error"),
-        ("PS_r", "r_mean_psf_mag", "r_mean_psf_mag_error"),
-        ("PS_i", "i_mean_psf_mag", "i_mean_psf_mag_error"),
-        ("PS_z", "z_mean_psf_mag", "z_mean_psf_mag_error"),
-        ("PS_y", "y_mean_psf_mag", "y_mean_psf_mag_error"),
+        ("PS_g", "g_mean_psf_mag", "g_mean_psf_mag_error", "g_mean_psf_mag_num_sigma_clipped"),
+        ("PS_r", "r_mean_psf_mag", "r_mean_psf_mag_error", "r_mean_psf_mag_num_sigma_clipped"),
+        ("PS_i", "i_mean_psf_mag", "i_mean_psf_mag_error", "i_mean_psf_mag_num_sigma_clipped"),
+        ("PS_z", "z_mean_psf_mag", "z_mean_psf_mag_error", "z_mean_psf_mag_num_sigma_clipped"),
+        ("PS_y", "y_mean_psf_mag", "y_mean_psf_mag_error", "y_mean_psf_mag_num_sigma_clipped"),
     ]
     n = 0
-    for out_name, c_mag, c_err in bands:
+    for out_name, c_mag, c_err, c_nclip in bands:
         m = _gaia_scalar(row, c_mag)
         err_cell = row[c_err] if c_err in row.colnames else None
         pair = _ps1_archive_mag_pair(m if math.isfinite(m) else None, err_cell)
         if pair is None:
             continue
+        # Require at least 2 sigma-clipped epochs; 0/1 indicates unreliable mean.
+        if c_nclip in row.colnames:
+            nclip = row[c_nclip]
+            if nclip is not None and not (hasattr(nclip, "mask") and nclip.mask):
+                if int(nclip) < 2:
+                    print(f"PS1 archive {out_name}: skipped (num_sigma_clipped={int(nclip)} < 2).")
+                    continue
         photometry.append((out_name, pair[0], pair[1]))
         n += 1
     return n
@@ -294,10 +304,15 @@ def query_catalogs(source_id, radius=3, ps1_vizier_epoch_jyear=PS1_VIZIER_DEFAUL
     job_ps = Gaia.launch_job(
         f"""
         SELECT TOP 10 ps.g_mean_psf_mag, ps.g_mean_psf_mag_error,
+               ps.g_mean_psf_mag_num_sigma_clipped,
                ps.r_mean_psf_mag, ps.r_mean_psf_mag_error,
+               ps.r_mean_psf_mag_num_sigma_clipped,
                ps.i_mean_psf_mag, ps.i_mean_psf_mag_error,
+               ps.i_mean_psf_mag_num_sigma_clipped,
                ps.z_mean_psf_mag, ps.z_mean_psf_mag_error,
-               ps.y_mean_psf_mag, ps.y_mean_psf_mag_error
+               ps.z_mean_psf_mag_num_sigma_clipped,
+               ps.y_mean_psf_mag, ps.y_mean_psf_mag_error,
+               ps.y_mean_psf_mag_num_sigma_clipped
         FROM gaiadr3.panstarrs1_best_neighbour AS nb
         INNER JOIN gaiadr2.panstarrs1_original_valid AS ps
             ON nb.original_ext_source_id = ps.obj_id
@@ -400,27 +415,30 @@ def query_catalogs(source_id, radius=3, ps1_vizier_epoch_jyear=PS1_VIZIER_DEFAUL
         else:
             print("DECam-u: no archive join row and Vizier fallback returned no match.")
 
+    # SDSS: query per-band flags alongside modelMag.  Drop any band where the
+    # SATURATED bit (0x40000, bit 18 of the 64-bit PhotoFlags) is set.
+    _SDSS_SATURATED = 0x40000
     sdss_data = SDSS.query_crossid(
         position,
         photoobj_fields=[
-            "modelMag_u",
-            "modelMag_g",
-            "modelMag_r",
-            "modelMag_i",
-            "modelMag_z",
-            "modelMagErr_u",
-            "modelMagErr_g",
-            "modelMagErr_r",
-            "modelMagErr_i",
-            "modelMagErr_z",
+            "modelMag_u", "modelMag_g", "modelMag_r", "modelMag_i", "modelMag_z",
+            "modelMagErr_u", "modelMagErr_g", "modelMagErr_r", "modelMagErr_i", "modelMagErr_z",
+            "flags_u", "flags_g", "flags_r", "flags_i", "flags_z",
         ],
     )
     if sdss_data is not None and len(sdss_data) > 0:
-        photometry.append(("SDSS_u", sdss_data["modelMag_u"][0], sdss_data["modelMagErr_u"][0]))
-        photometry.append(("SDSS_g", sdss_data["modelMag_g"][0], sdss_data["modelMagErr_g"][0]))
-        photometry.append(("SDSS_r", sdss_data["modelMag_r"][0], sdss_data["modelMagErr_r"][0]))
-        photometry.append(("SDSS_i", sdss_data["modelMag_i"][0], sdss_data["modelMagErr_i"][0]))
-        photometry.append(("SDSS_z", sdss_data["modelMag_z"][0], sdss_data["modelMagErr_z"][0]))
+        for band, col_mag, col_err, col_flag in (
+            ("SDSS_u", "modelMag_u", "modelMagErr_u", "flags_u"),
+            ("SDSS_g", "modelMag_g", "modelMagErr_g", "flags_g"),
+            ("SDSS_r", "modelMag_r", "modelMagErr_r", "flags_r"),
+            ("SDSS_i", "modelMag_i", "modelMagErr_i", "flags_i"),
+            ("SDSS_z", "modelMag_z", "modelMagErr_z", "flags_z"),
+        ):
+            flag_val = int(sdss_data[col_flag][0]) if col_flag in sdss_data.colnames else 0
+            if flag_val & _SDSS_SATURATED:
+                print(f"SDSS {band}: skipped (SATURATED flag set).")
+                continue
+            photometry.append((band, sdss_data[col_mag][0], sdss_data[col_err][0]))
 
     galex_data = Catalogs.query_region(position, catalog="GALEX", radius=radius)
     if len(galex_data) > 0:
@@ -454,29 +472,36 @@ def query_catalogs(source_id, radius=3, ps1_vizier_epoch_jyear=PS1_VIZIER_DEFAUL
         )
         Vizier.ROW_LIMIT = 1
         ps1_catalog = "II/349/ps1"
+        # Request per-band detection flags (f_*mag: 0=good, nonzero=bad/upper-limit)
+        # and the object-level qualityFlag (Qual bit 4 = 0x10 = SATURATED).
+        Vizier.columns = ["**", "f_gmag", "f_rmag", "f_imag", "f_zmag", "f_ymag", "Qual"]
         ps1_data = Vizier.query_region(ps1_search_pos, catalog=ps1_catalog, radius=radius)
         if ps1_data is not None and ps1_catalog in ps1_data.keys():
             ps1_table = ps1_data[ps1_catalog]
-            if good_number_checker(ps1_table["gmag"][0]) and good_number_checker(
-                ps1_table["e_gmag"][0]
-            ):
-                photometry.append(("PS_g", ps1_table["gmag"][0], ps1_table["e_gmag"][0]))
-            if good_number_checker(ps1_table["rmag"][0]) and good_number_checker(
-                ps1_table["e_rmag"][0]
-            ):
-                photometry.append(("PS_r", ps1_table["rmag"][0], ps1_table["e_rmag"][0]))
-            if good_number_checker(ps1_table["imag"][0]) and good_number_checker(
-                ps1_table["e_imag"][0]
-            ):
-                photometry.append(("PS_i", ps1_table["imag"][0], ps1_table["e_imag"][0]))
-            if good_number_checker(ps1_table["zmag"][0]) and good_number_checker(
-                ps1_table["e_zmag"][0]
-            ):
-                photometry.append(("PS_z", ps1_table["zmag"][0], ps1_table["e_zmag"][0]))
-            if good_number_checker(ps1_table["ymag"][0]) and good_number_checker(
-                ps1_table["e_ymag"][0]
-            ):
-                photometry.append(("PS_y", ps1_table["ymag"][0], ps1_table["e_ymag"][0]))
+            # Object-level saturation flag: skip all PS1 bands if Qual & 0x10.
+            _ps1_qual = int(ps1_table["Qual"][0]) if "Qual" in ps1_table.colnames else 0
+            _ps1_saturated = bool(_ps1_qual & 0x10)
+            if _ps1_saturated:
+                print("PS1 Vizier: skipped (object qualityFlag SATURATED bit set).")
+            else:
+                for ps_band, col_mag, col_err, col_flag in (
+                    ("PS_g", "gmag", "e_gmag", "f_gmag"),
+                    ("PS_r", "rmag", "e_rmag", "f_rmag"),
+                    ("PS_i", "imag", "e_imag", "f_imag"),
+                    ("PS_z", "zmag", "e_zmag", "f_zmag"),
+                    ("PS_y", "ymag", "e_ymag", "f_ymag"),
+                ):
+                    # Per-band flag: nonzero means non-detection or unreliable.
+                    if col_flag in ps1_table.colnames:
+                        fval = ps1_table[col_flag][0]
+                        if fval is not None and not (hasattr(fval, "mask") and fval.mask):
+                            if int(fval) != 0:
+                                print(f"PS1 Vizier {ps_band}: skipped (f_{col_flag[2:]}={int(fval)}).")
+                                continue
+                    if good_number_checker(ps1_table[col_mag][0]) and good_number_checker(
+                        ps1_table[col_err][0]
+                    ):
+                        photometry.append((ps_band, ps1_table[col_mag][0], ps1_table[col_err][0]))
 
     print(photometry)
     # Swift UVOT: future Path-2 gather will append pointed UVOT detections / 3σ ULs
