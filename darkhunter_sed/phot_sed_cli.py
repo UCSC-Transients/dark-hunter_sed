@@ -139,6 +139,15 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Override PHOENIX_DIR HiResFITS root",
     )
+    p.add_argument(
+        "--plot",
+        action="store_true",
+        default=False,
+        help=(
+            "Save diagnostic plots after the fit: SED panel, WD corner (wd model only), "
+            "and model-comparison bar chart.  Requires matplotlib >= 3.8."
+        ),
+    )
     return p
 
 
@@ -287,6 +296,17 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(f"summary: {paths['summary_json']}")
         print(f"samples: {paths['samples_npz']}")
+        if args.plot:
+            _run_phoenix_diagnostics(
+                rows=rows,
+                result=result,
+                gaia_id=gaia_id,
+                model=args.model,
+                predictor=predictor,
+                grid_phx=grid_phx,
+                bandpasses=bandpasses,
+                out_dir=Path(out_dir),
+            )
 
     elif args.model == "wd":
         from darkhunter_sed.wd_model import WDPriorBounds, run_wd_fit
@@ -303,12 +323,13 @@ def main(argv: list[str] | None = None) -> int:
         out_dir = args.outdir if args.outdir is not None else phot_sed_dir()
         wd_out = Path(out_dir) / gaia_id / "wd"
         system_age_yr = float(args.system_age) * 1e9
+        wd_prior_bounds = WDPriorBounds()
 
         wd_results = run_wd_fit(
             rows,
             wd_dir=wd_dir,
             system_age_yr=system_age_yr,
-            prior_bounds=WDPriorBounds(),
+            prior_bounds=wd_prior_bounds,
             nlive=int(args.nlive),
             maxiter=args.maxiter,
             seed=int(args.seed),
@@ -324,12 +345,224 @@ def main(argv: list[str] | None = None) -> int:
                 f"extrap={s['extrap_mass']}"
             )
         print(f"wd outputs: {wd_out}")
+        if args.plot:
+            _run_wd_diagnostics(
+                rows=rows,
+                wd_results=wd_results,
+                wd_prior_bounds=wd_prior_bounds,
+                wd_dir=wd_dir,
+                gaia_id=gaia_id,
+                out_dir=wd_out,
+            )
 
     else:
         print(f"Unsupported model: {args.model}", file=sys.stderr)
         return 2
 
     return 0
+
+
+def _run_phoenix_diagnostics(
+    rows: list,
+    result: object,
+    gaia_id: str,
+    model: str,
+    predictor: object,
+    grid_phx: object,
+    bandpasses: object,
+    out_dir: Path,
+) -> None:
+    """
+    Compute best-fit predictions and save diagnostic plots for a PHOENIX fit.
+
+    Parameters
+    ----------
+    rows :
+        Observed :class:`~darkhunter_sed.phot_sed_io.PhotRow` list.
+    result :
+        :class:`~darkhunter_sed.phot_sed_fit.FitResult1Star` or
+        :class:`~darkhunter_sed.phot_sed_fit.FitResult2Star`.
+    gaia_id :
+        Source id for filenames and titles.
+    model :
+        ``"1star"`` or ``"2star"``.
+    predictor, grid_phx, bandpasses :
+        MISTy predictor, PHOENIX grid, and synphot bandpasses.
+    out_dir :
+        Directory for output figures.
+
+    Limits
+    ------
+    Fails silently if ``matplotlib`` is unavailable or PHOENIX/MIST model
+    evaluation raises an exception (prints a warning to stderr).
+    """
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+    except ImportError:
+        print(
+            "WARNING: --plot requires matplotlib >= 3.8; skipping diagnostics.",
+            file=sys.stderr,
+        )
+        return
+
+    from darkhunter_sed.phot_sed_diagnostics import save_all_diagnostics
+    from darkhunter_sed.phot_sed_fit import _GAIA_CONSTRAINT_BANDS, _SIGMA_INT_IDX
+    from darkhunter_sed.phot_sed_models import predict_1star_phot, OneStarParams
+
+    phot_bands = [r.band for r in rows if r.band not in _GAIA_CONSTRAINT_BANDS]
+
+    model_preds: dict[str, dict[str, float]] = {}
+
+    try:
+        if model == "1star":
+            pred = predict_1star_phot(
+                result.best_theta[:_SIGMA_INT_IDX],
+                phot_bands,
+                mist_predictor=predictor,
+                phoenix_grid=grid_phx,
+                bandpasses=bandpasses,
+            )
+            model_preds["1-star"] = pred.mags
+        else:
+            # 2-star: combined + per-component
+            from darkhunter_sed.phot_sed_models import (
+                TwoStarParams,
+                predict_2star_phot,
+                solve_eep2_for_age_match,
+            )
+            from darkhunter_sed.misty_iso import evaluate_mist
+
+            pred_combined = predict_2star_phot(
+                result.best_theta,
+                phot_bands,
+                mist_predictor=predictor,
+                phoenix_grid=grid_phx,
+                bandpasses=bandpasses,
+            )
+            model_preds["2-star sum"] = pred_combined.mags
+
+            p = TwoStarParams.from_array(result.best_theta)
+            mist1 = evaluate_mist(p.eep1, p.mass1, p.feh, p.afe, predictor=predictor)
+            eep2 = solve_eep2_for_age_match(
+                mist1.age_gyr, p.mass2, p.feh, p.afe, predictor=predictor
+            )
+            if eep2 is not None:
+                star1_p = OneStarParams(
+                    eep=p.eep1, mass=p.mass1, feh=p.feh, afe=p.afe,
+                    a_v=p.a_v, parallax_mas=p.parallax_mas,
+                )
+                star2_p = OneStarParams(
+                    eep=eep2, mass=p.mass2, feh=p.feh, afe=p.afe,
+                    a_v=p.a_v, parallax_mas=p.parallax_mas,
+                )
+                pred_s1 = predict_1star_phot(
+                    star1_p, phot_bands,
+                    mist_predictor=predictor, phoenix_grid=grid_phx, bandpasses=bandpasses,
+                )
+                pred_s2 = predict_1star_phot(
+                    star2_p, phot_bands,
+                    mist_predictor=predictor, phoenix_grid=grid_phx, bandpasses=bandpasses,
+                )
+                model_preds["star1"] = pred_s1.mags
+                model_preds["star2"] = pred_s2.mags
+    except Exception as exc:
+        print(f"WARNING: best-fit prediction failed ({exc}); skipping diagnostics.", file=sys.stderr)
+        return
+
+    model_scores: dict[str, dict] = {
+        model if model == "1star" else "2-star sum": {
+            "logz": result.logz,
+            "bic": result.bic,
+        }
+    }
+
+    diag_dir = out_dir / gaia_id / "diagnostics"
+    diag_paths = save_all_diagnostics(
+        rows=rows,
+        model_preds=model_preds,
+        model_scores=model_scores,
+        gaia_id=gaia_id,
+        out_dir=diag_dir,
+    )
+    for key, p in diag_paths.items():
+        print(f"diagnostic [{key}]: {p}")
+
+
+def _run_wd_diagnostics(
+    rows: list,
+    wd_results: list,
+    wd_prior_bounds: object,
+    wd_dir: Path,
+    gaia_id: str,
+    out_dir: Path,
+) -> None:
+    """
+    Compute WD best-fit predictions and save all three diagnostic plots.
+
+    Parameters
+    ----------
+    rows :
+        Observed :class:`~darkhunter_sed.phot_sed_io.PhotRow` list.
+    wd_results :
+        List of :class:`~darkhunter_sed.wd_model.WDFitResult`.
+    wd_prior_bounds :
+        :class:`~darkhunter_sed.wd_model.WDPriorBounds` used for the fits.
+    wd_dir :
+        Bergeron WD table directory (for reconstructing the grid).
+    gaia_id :
+        Source id for filenames and titles.
+    out_dir :
+        Directory for output figures.
+
+    Limits
+    ------
+    Best-fit sample is the highest-weight posterior sample (MAP approximation).
+    Fails silently with a stderr warning if ``matplotlib`` is unavailable.
+    """
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+    except ImportError:
+        print(
+            "WARNING: --plot requires matplotlib >= 3.8; skipping diagnostics.",
+            file=sys.stderr,
+        )
+        return
+
+    from darkhunter_sed.bergeron_wd import BergeronGrid
+    from darkhunter_sed.phot_sed_diagnostics import save_all_diagnostics
+
+    model_preds: dict[str, dict[str, float]] = {}
+    model_scores: dict[str, dict] = {}
+
+    for res in wd_results:
+        label = f"WD-{res.atm_type}-{res.ifmr}"
+        # Best-fit = sample with highest posterior weight.
+        best_idx = int(np.argmax(res.weights))
+        teff, logg, av, plx = res.samples[best_idx]
+        dist_pc = 1000.0 / max(plx, 1e-6)
+        try:
+            grid = BergeronGrid.from_dir(wd_dir, res.atm_type)
+            sr = grid.synth_phot(teff, logg, av, dist_pc)
+            model_preds[label] = sr["mags"]
+        except Exception as exc:
+            print(f"WARNING: WD synth_phot failed for {label} ({exc})", file=sys.stderr)
+
+        model_scores[label] = {"logz": res.logevidence, "bic": None}
+
+    diag_dir = out_dir / "diagnostics"
+    diag_paths = save_all_diagnostics(
+        rows=rows,
+        model_preds=model_preds,
+        model_scores=model_scores,
+        gaia_id=gaia_id,
+        wd_results=wd_results,
+        wd_prior_bounds=wd_prior_bounds,
+        out_dir=diag_dir,
+    )
+    for key, p in diag_paths.items():
+        print(f"diagnostic [{key}]: {p}")
 
 
 if __name__ == "__main__":

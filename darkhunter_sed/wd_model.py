@@ -149,6 +149,9 @@ class WDFitResult:
         nan where Mi is outside the IFMR range.
     extrap_mask :
         Boolean array; True where M_WD > 1.3 M_sun or logg > 9.0.
+    t_cool_yr_samples :
+        WD cooling age in years for each posterior sample, from the Bergeron
+        grid interpolator.  Used by the diagnostics corner plot.
     """
 
     atm_type: AtmType
@@ -160,6 +163,7 @@ class WDFitResult:
     m_i_samples: NDArray[np.float64]
     m_i_unc_ifmr_samples: NDArray[np.float64]
     extrap_mask: NDArray[np.bool_]
+    t_cool_yr_samples: NDArray[np.float64]
 
     def summary(self) -> dict[str, Any]:
         """Return a JSON-serialisable summary dict for this combination."""
@@ -370,23 +374,25 @@ def run_wd_fit(
             weights = np.exp(dres.logwt - dres.logz[-1])
             logevidence = float(dres.logz[-1])
 
-            # Derive M_WD, M_i, and IFMR systematic σ_Mi for each posterior sample.
+            # Derive M_WD, M_i, IFMR σ_Mi, and t_cool for each posterior sample.
             n_samples = len(samples)
-            m_wd_arr     = np.empty(n_samples)
-            m_i_arr      = np.full(n_samples, float("nan"))
-            m_i_unc_arr  = np.full(n_samples, float("nan"))
-            extrap_arr   = np.zeros(n_samples, dtype=bool)
+            m_wd_arr       = np.empty(n_samples)
+            m_i_arr        = np.full(n_samples, float("nan"))
+            m_i_unc_arr    = np.full(n_samples, float("nan"))
+            extrap_arr     = np.zeros(n_samples, dtype=bool)
+            t_cool_yr_arr  = np.empty(n_samples)
 
             for j in range(n_samples):
                 teff, logg, av, plx = samples[j]
                 dist_pc = 1000.0 / max(plx, 1e-6)
                 sr = grid.synth_phot(teff, logg, av, dist_pc, bands=None)
                 mw = sr["m_wd"]
-                m_wd_arr[j]    = mw
-                mi, sigma_mi   = ifmr.initial_mass_unc(mw)
-                m_i_arr[j]     = mi
-                m_i_unc_arr[j] = sigma_mi
-                extrap_arr[j]  = sr["extrap_mass"]
+                m_wd_arr[j]       = mw
+                mi, sigma_mi      = ifmr.initial_mass_unc(mw)
+                m_i_arr[j]        = mi
+                m_i_unc_arr[j]    = sigma_mi
+                extrap_arr[j]     = sr["extrap_mass"]
+                t_cool_yr_arr[j]  = sr["cooling_age_yr"]
 
             result = WDFitResult(
                 atm_type=atm,
@@ -398,6 +404,7 @@ def run_wd_fit(
                 m_i_samples=m_i_arr,
                 m_i_unc_ifmr_samples=m_i_unc_arr,
                 extrap_mask=extrap_arr,
+                t_cool_yr_samples=t_cool_yr_arr,
             )
             results.append(result)
 
@@ -411,6 +418,7 @@ def run_wd_fit(
                     m_wd=m_wd_arr,
                     m_i=m_i_arr,
                     m_i_unc_ifmr=m_i_unc_arr,
+                    t_cool_yr=t_cool_yr_arr,
                 )
                 summ = result.summary()
                 (outdir / f"{stem}_summary.json").write_text(
