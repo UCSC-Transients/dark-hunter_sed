@@ -270,6 +270,13 @@ _GAIA_CONSTRAINT_BANDS = frozenset({_PLX_BAND, _TEFF_BAND, _LOGG_BAND, _MH_BAND}
 
 _PHOT_ERR_FLOOR: float = 0.02  # mag — systematic floor (PHOENIX model + zero-point)
 _SIGMA_INT_IDX: int = len(ONE_STAR_PARAM_NAMES)  # index of sigma_int in the 7-D theta
+# Exponential prior scale for sigma_int.  A flat (uniform) prior lets the sampler
+# inflate sigma_int to absorb photometric residuals without physically improving the
+# model, biasing luminosity and other parameters.  The exponential prior with this
+# scale means the median prior value is ~0.03 mag (ln 2 × scale) and P(>0.15 mag)
+# is only ~5%, so real intrinsic scatter can still be recovered without the sampler
+# "cheating" by running sigma_int to its ceiling.
+_SIGMA_INT_PRIOR_SCALE: float = 0.05  # mag
 # Finite floor returned when the model fails (off-grid MIST/PHOENIX, NaN outputs, or
 # physically impossible age).  Must be > -1e6: dynesty converts any loglstar <= -1e6 to
 # -np.inf for display, which corrupts the running logz estimate (produces nan).
@@ -446,7 +453,18 @@ def fit_1star_dynesty(
     _ref_g_mag: float | None = float(_g_rows[0].mag) if _g_rows else None
 
     def prior_transform(u: NDArray[np.floating]) -> NDArray[np.float64]:
-        return _unit_cube_to_bounds(u, bound_list)
+        theta = _unit_cube_to_bounds(u, bound_list)
+        # sigma_int: exponential prior (scale=_SIGMA_INT_PRIOR_SCALE) instead of
+        # uniform.  A flat prior lets the sampler push sigma_int to its ceiling to
+        # absorb photometric residuals, biasing luminosity and other parameters.
+        # Inverse CDF of Exp(scale) truncated at the sigma_int upper bound.
+        u_sig = float(u[_SIGMA_INT_IDX])
+        sig_hi = float(bound_list[_SIGMA_INT_IDX][1])
+        trunc = 1.0 - math.exp(-sig_hi / _SIGMA_INT_PRIOR_SCALE)
+        theta[_SIGMA_INT_IDX] = -_SIGMA_INT_PRIOR_SCALE * math.log(
+            1.0 - u_sig * trunc + 1e-300
+        )
+        return theta
 
     def loglike(theta: NDArray[np.floating]) -> float:
         sigma_int = float(theta[_SIGMA_INT_IDX])
