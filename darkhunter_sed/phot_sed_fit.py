@@ -22,6 +22,7 @@ from darkhunter_sed.misty_iso import (
     DEFAULT_EEP_BOUNDS,
     DEFAULT_MASS_BOUNDS,
     MistPredictFn,
+    evaluate_mist,
 )
 from darkhunter_sed.phot_sed_io import FLAG_DETECTION, FLAG_UPPER_LIMIT, PhotRow
 from darkhunter_sed.phot_sed_models import (
@@ -42,6 +43,10 @@ DEFAULT_AFE_BOUNDS: tuple[float, float] = (-0.2, 0.6)
 DEFAULT_AV_BOUNDS: tuple[float, float] = (0.0, 5.0)
 DEFAULT_PARALLAX_BOUNDS: tuple[float, float] = (0.1, 100.0)  # mas
 DEFAULT_SIGMA_INT_BOUNDS: tuple[float, float] = (0.0, 0.5)  # intrinsic scatter, mag
+# Tighter mass prior for 1-star SED fits.  M > 2.0 gives Teff > PHOENIX upper limit
+# (12 000 K).  The lower bound 0.5 covers late K/M dwarfs; use
+# OneStarPriorBounds(mass=...) to override for targets outside this range.
+_FIT_MASS_BOUNDS: tuple[float, float] = (0.5, 2.0)
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,7 +62,7 @@ class OneStarPriorBounds:
     """
 
     eep: tuple[float, float] = DEFAULT_EEP_BOUNDS
-    mass: tuple[float, float] = DEFAULT_MASS_BOUNDS
+    mass: tuple[float, float] = _FIT_MASS_BOUNDS
     feh: tuple[float, float] = DEFAULT_FEH_BOUNDS
     a_v: tuple[float, float] = DEFAULT_AV_BOUNDS
     parallax_mas: tuple[float, float] = DEFAULT_PARALLAX_BOUNDS
@@ -266,9 +271,23 @@ _GAIA_CONSTRAINT_BANDS = frozenset({_PLX_BAND, _TEFF_BAND, _LOGG_BAND, _MH_BAND}
 _PHOT_ERR_FLOOR: float = 0.02  # mag — systematic floor (PHOENIX model + zero-point)
 _SIGMA_INT_IDX: int = len(ONE_STAR_PARAM_NAMES)  # index of sigma_int in the 7-D theta
 # Finite floor returned when the model fails (off-grid MIST/PHOENIX, NaN outputs, or
-# physically impossible age).  Must be finite so dynesty always has a non-(-inf) loglstar.
-_LOGLIKE_FLOOR: float = -1e100
+# physically impossible age).  Must be > -1e6: dynesty converts any loglstar <= -1e6 to
+# -np.inf for display, which corrupts the running logz estimate (produces nan).
+# A value of -1e5 is far below any valid photometric fit (~-10 to -100) while
+# remaining displayable as -1e+05 rather than -inf.
+_LOGLIKE_FLOOR: float = -1e5
 _UNIVERSE_AGE_GYR: float = 13.8  # stellar age hard upper limit (physical, not photometric)
+# PHOENIX-HiRes grid Teff axis bounds.  Evaluated before calling PHOENIX to avoid
+# expensive grid lookup + ValueError for parameters outside the grid.
+_PHOENIX_TEFF_MIN: float = 2300.0  # K — PHOENIX lower Teff limit
+_PHOENIX_TEFF_MAX: float = 12000.0  # K — PHOENIX upper Teff limit
+# Bolometric correction: MIST log_l + parallax → approximate apparent bolometric mag.
+# Compare to observed Gaia G.  Rejects wildly inconsistent models before PHOENIX.
+# A_G / A_V ≈ 0.789 for Gaia G band (Fitzpatrick 1999, R_V = 3.1).
+_AV_PARAM_IDX: int = 3  # Av index in the theta vector
+_A_G_PER_AV: float = 0.789
+_LUM_PREFILTER_MAG: float = 5.0  # reject if |pred_bol - obs_G| > 5 mag
+_ABS_BOL_SUN: float = 4.74  # solar absolute bolometric magnitude
 # Gaia GSP-Phot Teff/logg are photometrically derived (G/BP/RP), so using them as
 # likelihood constraints while also fitting Gaia photometry is partially circular.
 # Inflate their errors by this factor to down-weight them accordingly.
@@ -422,11 +441,45 @@ def fit_1star_dynesty(
         except Exception:
             pass
 
+    # Reference Gaia G magnitude for the luminosity pre-filter (extracted once).
+    _g_rows = [r for r in phot_rows if r.band == "GaiaDR3_G"]
+    _ref_g_mag: float | None = float(_g_rows[0].mag) if _g_rows else None
+
     def prior_transform(u: NDArray[np.floating]) -> NDArray[np.float64]:
         return _unit_cube_to_bounds(u, bound_list)
 
     def loglike(theta: NDArray[np.floating]) -> float:
         sigma_int = float(theta[_SIGMA_INT_IDX])
+        # Fast MIST-first validation: evaluate stellar params before the expensive
+        # PHOENIX call.  Rejects age > universe and Teff outside PHOENIX grid without
+        # touching the PHOENIX interpolation code at all.
+        try:
+            mist_check = evaluate_mist(
+                float(theta[0]), float(theta[1]), float(theta[2]), 0.0,
+                predictor=mist_predictor,
+            )
+        except Exception:
+            return _LOGLIKE_FLOOR
+        if not (math.isfinite(mist_check.teff_k) and math.isfinite(mist_check.logg)):
+            return _LOGLIKE_FLOOR
+        if mist_check.age_gyr > _UNIVERSE_AGE_GYR:
+            return _LOGLIKE_FLOOR
+        if not (_PHOENIX_TEFF_MIN <= mist_check.teff_k <= _PHOENIX_TEFF_MAX):
+            return _LOGLIKE_FLOOR
+        # Luminosity pre-filter: predicted apparent bolometric magnitude from MIST
+        # log(L) + sampled parallax + Av extinction.  Compare to observed Gaia G.
+        # Rejects models that are wildly inconsistent with the observed brightness
+        # (including old evolved giants that are too bright and massive hot stars).
+        # Includes reddening so extinction-dominated sightlines are handled correctly.
+        if _ref_g_mag is not None and math.isfinite(mist_check.log_l):
+            plx_mas = float(theta[_PLX_PARAM_IDX])
+            if plx_mas > 0:
+                dist_pc = 1000.0 / plx_mas
+                av = float(theta[_AV_PARAM_IDX])
+                abs_bol = _ABS_BOL_SUN - 2.5 * mist_check.log_l
+                app_bol = abs_bol + 5.0 * math.log10(dist_pc) - 5.0 + _A_G_PER_AV * av
+                if not math.isfinite(app_bol) or abs(app_bol - _ref_g_mag) > _LUM_PREFILTER_MAG:
+                    return _LOGLIKE_FLOOR
         try:
             pred = predict_1star_phot(
                 theta[:_SIGMA_INT_IDX],  # physical params only
@@ -439,12 +492,6 @@ def fit_1star_dynesty(
                 mag_system=mag_system,
             )
         except Exception:
-            return _LOGLIKE_FLOOR
-        # Guard against NaN from off-grid MIST predictions.
-        if not (math.isfinite(pred.mist.teff_k) and math.isfinite(pred.mist.logg)):
-            return _LOGLIKE_FLOOR
-        # Physically impossible: star older than the universe.
-        if pred.mist.age_gyr > _UNIVERSE_AGE_GYR:
             return _LOGLIKE_FLOOR
         lnl = photometry_loglike(pred.mags, phot_rows, sigma_int=sigma_int)
         if not math.isfinite(lnl):
@@ -466,7 +513,12 @@ def fit_1star_dynesty(
         for lr in logg_rows:
             resid = (pred.mist.logg - lr.mag) / (lr.err * _GAIA_PHOT_CONSTRAINT_ERR_SCALE)
             lnl += -0.5 * resid * resid
-        return lnl if math.isfinite(lnl) else _LOGLIKE_FLOOR
+        # Cap at floor so lnl never goes below _LOGLIKE_FLOOR (which is just above
+        # dynesty's -1e6 display threshold).  Prevents photometric residuals for
+        # wildly wrong models from producing values dynesty would show as -inf.
+        if not math.isfinite(lnl) or lnl < _LOGLIKE_FLOOR:
+            return _LOGLIKE_FLOOR
+        return float(lnl)
 
     pool: Any = None
     queue_size: int | None = None
