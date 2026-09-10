@@ -317,6 +317,17 @@ def _make_loglike(
     (log_likelihood, prior_transform)
         Both accept / return 1-D numpy arrays of length 4 (or 6 with BB).
     """
+    # Extract Gaia parallax measurement before filtering to Bergeron bands.
+    # Without this, parallax is a free parameter with no data constraint and
+    # the sampler pushes it to the prior ceiling (100 mas = 10 pc), giving a
+    # completely degenerate (and wrong) posterior.
+    _PLX_BAND = "Gaia_parallax"
+    _gaia_plx_rows = [r for r in obs_rows if r.band == _PLX_BAND]
+    _gaia_plx: float | None = float(_gaia_plx_rows[0].mag) if _gaia_plx_rows else None
+    _gaia_plx_err: float | None = float(_gaia_plx_rows[0].err) if _gaia_plx_rows else None
+    if _gaia_plx is None:
+        print("  [wd] WARNING: no Gaia_parallax row found; parallax will be unconstrained.")
+
     obs_bands = [r.band for r in obs_rows]
     obs_mags  = np.array([r.mag for r in obs_rows], dtype=np.float64)
     obs_errs  = np.array([r.err for r in obs_rows], dtype=np.float64)
@@ -377,7 +388,11 @@ def _make_loglike(
             pred_mags = np.array([result["mags"][b] for b in band_subset])
 
         resid = mag_vec - pred_mags
-        return -0.5 * (float(np.dot(resid ** 2, inv_var)) + norm_sum)
+        lnl = -0.5 * (float(np.dot(resid ** 2, inv_var)) + norm_sum)
+        # Gaussian parallax constraint from Gaia.
+        if _gaia_plx is not None and _gaia_plx_err is not None and _gaia_plx_err > 0:
+            lnl += -0.5 * ((plx - _gaia_plx) / _gaia_plx_err) ** 2
+        return lnl
 
     def prior_transform(u: NDArray[np.float64]) -> NDArray[np.float64]:
         result = np.empty(len(all_bounds))
