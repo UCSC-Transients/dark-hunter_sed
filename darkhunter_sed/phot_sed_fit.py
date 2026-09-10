@@ -265,6 +265,10 @@ _GAIA_CONSTRAINT_BANDS = frozenset({_PLX_BAND, _TEFF_BAND, _LOGG_BAND, _MH_BAND}
 
 _PHOT_ERR_FLOOR: float = 0.02  # mag — systematic floor (PHOENIX model + zero-point)
 _SIGMA_INT_IDX: int = len(ONE_STAR_PARAM_NAMES)  # index of sigma_int in the 7-D theta
+# Gaia GSP-Phot Teff/logg are photometrically derived (G/BP/RP), so using them as
+# likelihood constraints while also fitting Gaia photometry is partially circular.
+# Inflate their errors by this factor to down-weight them accordingly.
+_GAIA_PHOT_CONSTRAINT_ERR_SCALE: float = 10.0
 
 
 def fit_1star_dynesty(
@@ -449,12 +453,14 @@ def fit_1star_dynesty(
         for mr in mh_rows:
             resid = (float(theta[_FEH_PARAM_IDX]) - mr.mag) / mr.err
             lnl += -0.5 * resid * resid
-        # Gaia GSP-Phot Teff/logg constraints from the MIST prediction.
+        # Gaia GSP-Phot Teff/logg: photometrically derived, so partially circular
+        # with our own photometric fit.  Errors inflated by _GAIA_PHOT_CONSTRAINT_ERR_SCALE
+        # to down-weight these terms while still keeping them as weak regularisers.
         for tr in teff_rows:
-            resid = (pred.mist.teff_k - tr.mag) / tr.err
+            resid = (pred.mist.teff_k - tr.mag) / (tr.err * _GAIA_PHOT_CONSTRAINT_ERR_SCALE)
             lnl += -0.5 * resid * resid
         for lr in logg_rows:
-            resid = (pred.mist.logg - lr.mag) / lr.err
+            resid = (pred.mist.logg - lr.mag) / (lr.err * _GAIA_PHOT_CONSTRAINT_ERR_SCALE)
             lnl += -0.5 * resid * resid
         return lnl
 
