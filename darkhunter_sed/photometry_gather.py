@@ -23,6 +23,20 @@ import astropy.coordinates as coord
 # to ~2011 matches the PS1 observation era better than J2000.0 (which is only equinox).
 PS1_VIZIER_DEFAULT_EPOCH_JY = 2011.0
 
+# AB minus Vegamag zero-point offsets for catalogs that publish in the Vega system.
+# Add to the catalog Vega magnitude to obtain the AB magnitude compared by the model.
+# Gaia G/BP/RP, GALEX, SDSS, PS1, and DECam are on (or very close to) the AB
+# system and need no offset.  Sources: Blanton & Roweis 2007 (2MASS), Wright+2010 (WISE).
+_VEGA_TO_AB: dict[str, float] = {
+    "2MASS_J":  0.895,
+    "2MASS_H":  1.379,
+    "2MASS_Ks": 1.840,
+    "WISE_W1":  2.699,
+    "WISE_W2":  3.339,
+    "WISE_W3":  5.174,
+    "WISE_W4":  6.620,
+}
+
 logger = logging.getLogger(__name__)
 
 
@@ -111,7 +125,8 @@ def _append_wise_from_irsa(position, photometry, radius):
         mag = wise_data[c_mag][0]
         err = wise_data[c_err][0]
         if good_number_checker(mag) and good_number_checker(err):
-            photometry.append((out_name, float(mag), float(err)))
+            ab_offset = _VEGA_TO_AB.get(out_name, 0.0)
+            photometry.append((out_name, float(mag) + ab_offset, float(err)))
             n += 1
     return n
 
@@ -378,11 +393,11 @@ def query_catalogs(source_id, radius=3, ps1_vizier_epoch_jyear=PS1_VIZIER_DEFAUL
         hm, hme = tmass_data["h_m"][0], tmass_data["h_msigcom"][0]
         km, kme = tmass_data["k_m"][0], tmass_data["k_msigcom"][0]
         if good_number_checker(jm) and good_number_checker(jme):
-            photometry.append(("2MASS_J", float(jm), float(jme)))
+            photometry.append(("2MASS_J",  float(jm) + _VEGA_TO_AB["2MASS_J"],  float(jme)))
         if good_number_checker(hm) and good_number_checker(hme):
-            photometry.append(("2MASS_H", float(hm), float(hme)))
+            photometry.append(("2MASS_H",  float(hm) + _VEGA_TO_AB["2MASS_H"],  float(hme)))
         if good_number_checker(km) and good_number_checker(kme):
-            photometry.append(("2MASS_Ks", float(km), float(kme)))
+            photometry.append(("2MASS_Ks", float(km) + _VEGA_TO_AB["2MASS_Ks"], float(kme)))
 
     _append_wise_from_irsa(position, photometry, radius)
 
