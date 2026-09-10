@@ -51,21 +51,21 @@ class OneStarPriorBounds:
 
     Parameters
     ----------
-    eep, mass, feh, afe, a_v, parallax_mas :
+    eep, mass, feh, a_v, parallax_mas :
         Inclusive ``(lo, hi)`` bounds in :data:`ONE_STAR_PARAM_NAMES` order.
+        aFe is fixed at 0.0 (PHOENIX alpha grid is sparse for non-zero alpha).
     """
 
     eep: tuple[float, float] = DEFAULT_EEP_BOUNDS
     mass: tuple[float, float] = DEFAULT_MASS_BOUNDS
     feh: tuple[float, float] = DEFAULT_FEH_BOUNDS
-    afe: tuple[float, float] = DEFAULT_AFE_BOUNDS
     a_v: tuple[float, float] = DEFAULT_AV_BOUNDS
     parallax_mas: tuple[float, float] = DEFAULT_PARALLAX_BOUNDS
     sigma_int: tuple[float, float] = DEFAULT_SIGMA_INT_BOUNDS
 
     def as_list(self) -> list[tuple[float, float]]:
         """Return bounds in dynesty parameter order (physical params + sigma_int)."""
-        return [self.eep, self.mass, self.feh, self.afe, self.a_v, self.parallax_mas, self.sigma_int]
+        return [self.eep, self.mass, self.feh, self.a_v, self.parallax_mas, self.sigma_int]
 
 
 @dataclass(frozen=True, slots=True)
@@ -255,7 +255,7 @@ def load_bandpasses_for_bands(
 
 
 _PLX_BAND = "Gaia_parallax"
-_PLX_PARAM_IDX = 5  # parallax_mas is the 6th element of OneStarParams (0-indexed)
+_PLX_PARAM_IDX = 4  # parallax_mas is the 5th element of the free-param vector (0-indexed)
 _PLX_SIGMA_CLIP = 5.0  # tight flat prior spans ± this many σ around observed plx
 _TEFF_BAND = "Gaia_Teff"
 _LOGG_BAND = "Gaia_logg"

@@ -149,7 +149,7 @@ def test_bic_formula() -> None:
 
 def test_fit_1star_dynesty_synthetic(tmp_path: Path) -> None:
     truth = OneStarParams(
-        eep=320.0, mass=1.05, feh=-0.1, afe=0.05, a_v=0.15, parallax_mas=12.0
+        eep=320.0, mass=1.05, feh=-0.1, afe=0.0, a_v=0.15, parallax_mas=12.0
     )
     bands = ["b0", "b1", "b2", "b3", "b4", "b5", "b6", "b7"]
     truth_pred = predict_1star_phot(
@@ -166,7 +166,6 @@ def test_fit_1star_dynesty_synthetic(tmp_path: Path) -> None:
         eep=(300.0, 340.0),
         mass=(0.9, 1.2),
         feh=(-0.3, 0.1),
-        afe=(-0.05, 0.15),
         a_v=(0.0, 0.5),
         parallax_mas=(8.0, 16.0),
     )
@@ -196,7 +195,7 @@ def test_fit_1star_dynesty_synthetic(tmp_path: Path) -> None:
     assert result.ln_l_max >= ln_truth - 5.0
     wrong = truth.as_array().copy()
     wrong[0] = bounds.eep[0]
-    wrong[4] = bounds.a_v[1]
+    wrong[3] = bounds.a_v[1]
     ln_wrong = photometry_loglike(
         predict_1star_phot(
             wrong,
@@ -262,7 +261,6 @@ def _make_tight_fit_args(tmp_path: Path) -> tuple[list[PhotRow], OneStarPriorBou
         eep=(280.0, 320.0),
         mass=(0.8, 1.2),
         feh=(-0.2, 0.2),
-        afe=(-0.1, 0.1),
         a_v=(0.0, 0.3),
         parallax_mas=(8.0, 12.0),
     )
