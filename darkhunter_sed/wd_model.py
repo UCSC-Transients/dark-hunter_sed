@@ -663,11 +663,8 @@ def _make_wdstar_loglike(
 
     # Set PHOENIX wavelength grid once for efficiency.
     if phoenix_grid is not None and bandpasses is not None:
-        import numpy as _np
-        wave_grid = _np.array(
-            sorted({w for bp in bandpasses.values() for w in bp.wavelengths})
-        )
-        phoenix_grid.set_photometry_wavelengths(wave_grid)
+        from darkhunter_sed.filters_synphot import bandpass_wavelength_grid
+        phoenix_grid.set_photometry_wavelengths(bandpass_wavelength_grid(bandpasses))
 
     # Narrow parallax prior around Gaia measurement.
     plx_lo, plx_hi = bounds.parallax_mas
