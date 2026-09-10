@@ -22,7 +22,6 @@ from darkhunter_sed.misty_iso import (
     DEFAULT_EEP_BOUNDS,
     DEFAULT_MASS_BOUNDS,
     MistPredictFn,
-    evaluate_mist,
 )
 from darkhunter_sed.phot_sed_io import FLAG_DETECTION, FLAG_UPPER_LIMIT, PhotRow
 from darkhunter_sed.phot_sed_models import (
@@ -372,7 +371,7 @@ def fit_1star_dynesty(
     # Tighten flat priors from Gaia constraints so dynesty doesn't waste live
     # points in regions that have essentially zero likelihood.
     prior = bounds if bounds is not None else OneStarPriorBounds()
-    if bounds is None and (plx_rows or mh_rows or teff_rows or logg_rows):
+    if bounds is None and (plx_rows or mh_rows):
         tight_kw: dict[str, tuple[float, float]] = {}
         if plx_rows:
             plx_obs = plx_rows[0].mag
@@ -386,46 +385,6 @@ def fit_1star_dynesty(
             lo_f = max(DEFAULT_FEH_BOUNDS[0], mh_obs - _PLX_SIGMA_CLIP * mh_err)
             hi_f = min(DEFAULT_FEH_BOUNDS[1], mh_obs + _PLX_SIGMA_CLIP * mh_err)
             tight_kw["feh"] = (lo_f, hi_f)
-        # Tighten EEP and Mass priors using Gaia Teff/logg via a coarse MISTy scan.
-        # This prevents dynesty from wasting live points in the ~90% of (EEP, Mass)
-        # space that is ruled out by the stellar parameter constraints.
-        if (teff_rows or logg_rows) and mist_predictor is not None:
-            feh_ctr = 0.5 * sum(tight_kw.get("feh", DEFAULT_FEH_BOUNDS))
-            afe_ctr = 0.5 * (DEFAULT_AFE_BOUNDS[0] + DEFAULT_AFE_BOUNDS[1])
-            teff_obs = teff_rows[0].mag if teff_rows else None
-            teff_err = teff_rows[0].err if teff_rows else None
-            logg_obs = logg_rows[0].mag if logg_rows else None
-            logg_err = logg_rows[0].err if logg_rows else None
-            n_eep, n_mass = 50, 25
-            eep_grid = np.linspace(DEFAULT_EEP_BOUNDS[0], DEFAULT_EEP_BOUNDS[1], n_eep)
-            mass_grid = np.linspace(DEFAULT_MASS_BOUNDS[0], DEFAULT_MASS_BOUNDS[1], n_mass)
-            valid_eep: list[float] = []
-            valid_mass: list[float] = []
-            for _eep in eep_grid:
-                for _mass in mass_grid:
-                    try:
-                        mp = evaluate_mist(_eep, _mass, feh_ctr, afe_ctr, predictor=mist_predictor)
-                    except Exception:
-                        continue
-                    ok = True
-                    if teff_obs is not None:
-                        ok = ok and abs(mp.teff_k - teff_obs) <= _PLX_SIGMA_CLIP * teff_err
-                    if logg_obs is not None:
-                        ok = ok and abs(mp.logg - logg_obs) <= _PLX_SIGMA_CLIP * logg_err
-                    if ok:
-                        valid_eep.append(_eep)
-                        valid_mass.append(_mass)
-            if valid_eep:
-                eep_step = (DEFAULT_EEP_BOUNDS[1] - DEFAULT_EEP_BOUNDS[0]) / n_eep
-                mass_step = (DEFAULT_MASS_BOUNDS[1] - DEFAULT_MASS_BOUNDS[0]) / n_mass
-                tight_kw["eep"] = (
-                    max(DEFAULT_EEP_BOUNDS[0], min(valid_eep) - eep_step),
-                    min(DEFAULT_EEP_BOUNDS[1], max(valid_eep) + eep_step),
-                )
-                tight_kw["mass"] = (
-                    max(DEFAULT_MASS_BOUNDS[0], min(valid_mass) - mass_step),
-                    min(DEFAULT_MASS_BOUNDS[1], max(valid_mass) + mass_step),
-                )
         prior = OneStarPriorBounds(**tight_kw)
 
     bound_list = prior.as_list()
