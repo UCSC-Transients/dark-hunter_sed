@@ -129,6 +129,57 @@ def test_phoenix_multilinear_interp_recovers_analytic() -> None:
     np.testing.assert_allclose(flux, expected, rtol=1e-10)
 
 
+def test_hires_stride_default_is_full_resolution() -> None:
+    """hires_stride defaults to 1: no shape change vs. the raw injected grid."""
+    wave = _tiny_wave()
+    grid = _mock_grid()
+    assert grid.wavelength.shape == wave.shape
+    np.testing.assert_array_equal(grid.wavelength, wave)
+
+
+def test_hires_stride_thins_wavelength_and_loaded_flux() -> None:
+    """hires_stride subsamples both self.wavelength and every loaded flux array,
+    keeping them shape-consistent (issue #65)."""
+    wave = _tiny_wave()
+    specs: dict[tuple[float, float, float, float], np.ndarray] = {}
+    points: list[PhoenixPoint] = []
+    for teff in (5000.0, 5200.0):
+        for logg in (4.0, 4.5):
+            key = (teff, logg, 0.0, 0.0)
+            val = teff + 100.0 * logg
+            specs[key] = np.full_like(wave, val)
+            points.append(
+                PhoenixPoint(teff, logg, 0.0, 0.0, Path(f"/mock/lte{teff:.0f}-{logg:.2f}.fits"))
+            )
+
+    def loader(path: Path) -> np.ndarray:
+        body = path.name.replace(".fits", "").removeprefix("lte")
+        teff_s, logg_s = body.split("-")
+        return specs[(float(teff_s), float(logg_s), 0.0, 0.0)]
+
+    stride = 4
+    grid = PhoenixGrid(
+        root="/tmp/mock-phoenix",
+        wavelength=wave,
+        points=points,
+        flux_loader=loader,
+        to_flam=False,
+        hires_stride=stride,
+    )
+    assert grid.wavelength.shape == (len(wave) // stride,)
+    np.testing.assert_array_equal(grid.wavelength, wave[::stride])
+
+    loaded = grid._load(points[0])
+    assert loaded.shape == grid.wavelength.shape
+    np.testing.assert_array_equal(loaded, specs[(5000.0, 4.0, 0.0, 0.0)][::stride])
+
+    # Multilinear interpolation still recovers the analytic value at reduced
+    # resolution -- strided grids don't corrupt the parameter-space math.
+    interp_wave, flux = grid.spectrum(5100.0, 4.25, 0.0, 0.0, interpolate=True)
+    assert interp_wave.shape == (len(wave) // stride,)
+    np.testing.assert_allclose(flux, 5100.0 + 100.0 * 4.25, rtol=1e-10)
+
+
 def test_phoenix_alpha_required_when_missing() -> None:
     wave = _tiny_wave()
     pts = [
