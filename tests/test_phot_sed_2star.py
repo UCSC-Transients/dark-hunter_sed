@@ -307,6 +307,41 @@ def test_fit_2star_dynesty_smoke() -> None:
     assert result.param_names == TWO_STAR_PARAM_NAMES
 
 
+def test_fit_2star_dynesty_excludes_gaia_constraint_bands() -> None:
+    """
+    A ``Gaia_parallax`` row must never reach the forward-model band list.
+
+    Regression test for issue #57: the real ``synthesize_mags`` raises
+    ``KeyError`` for unregistered band names like ``Gaia_parallax``, which the
+    likelihood's blanket ``except Exception`` silently turned into a permanent
+    ``_LOGLIKE_FLOOR`` for every sample. This test's synth stub reproduces that
+    KeyError so the fit fails loudly (via a non-finite logz) if the Gaia band
+    ever leaks back into ``bands``.
+    """
+    rows, bounds = _make_2star_rows_and_bounds()
+    rows = rows + [PhotRow("Gaia_parallax", 10.0, 0.5, FLAG_DETECTION)]
+
+    def _synth_2star_strict(*args, **kwargs):
+        bands = kwargs.get("bands", args[7] if len(args) > 7 else [])
+        for b in bands:
+            if b not in {"b0", "b1", "b2", "b3"}:
+                raise KeyError(f"Unknown band {b!r}")
+        return _mock_synth_2star(*args, **kwargs)
+
+    result = fit_2star_dynesty(
+        rows,
+        mist_predictor=_mock_mist_predictor,
+        synth_2star=_synth_2star_strict,
+        bounds=bounds,
+        nlive=12,
+        maxiter=20,
+        seed=0,
+        jit_warmup=False,
+    )
+    assert math.isfinite(result.logz)
+    assert result.ln_l_max > -1e4
+
+
 def test_run_2star_fit_writes_outputs(tmp_path: Path) -> None:
     """run_2star_fit writes summary JSON and samples npz with correct model field."""
     rows, bounds = _make_2star_rows_and_bounds()

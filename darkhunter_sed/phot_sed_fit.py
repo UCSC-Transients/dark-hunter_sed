@@ -1019,7 +1019,14 @@ def fit_2star_dynesty(
         bound_list = prior.as_list() + bb_bounds.as_list()  # type: ignore[union-attr]
     else:
         bound_list = prior.as_list()
-    bands = [r.band for r in rows]
+    # Exclude Gaia pseudo-photometry rows (parallax/Teff/logg/MH) from the
+    # forward-model band list — they are not registered bandpasses and raise
+    # KeyError inside synthesize_mags, which the blanket except below then
+    # turns into a permanent _LOGLIKE_FLOOR for every sample (see issue #57).
+    phot_rows = [r for r in rows if r.band not in _GAIA_CONSTRAINT_BANDS]
+    if not phot_rows:
+        raise ValueError("rows contains only Gaia constraints; need photometric bands too")
+    bands = [r.band for r in phot_rows]
     ndim = len(TWO_STAR_PARAM_NAMES) + (len(BB_PARAM_NAMES) if use_bb_2star else 0)
     _2S_BB_T_IDX = len(TWO_STAR_PARAM_NAMES)
     _2S_BB_L_IDX = len(TWO_STAR_PARAM_NAMES) + 1
@@ -1096,7 +1103,7 @@ def fit_2star_dynesty(
             )
         except Exception:
             return _LOGLIKE_FLOOR
-        lnl2 = photometry_loglike(pred.mags, rows)
+        lnl2 = photometry_loglike(pred.mags, phot_rows)
         return lnl2 if math.isfinite(lnl2) else _LOGLIKE_FLOOR
 
     pool: Any = None
@@ -1308,7 +1315,7 @@ def run_2star_fit(
     if with_bb_2star:
         bb_t_k_best_2s = 10.0 ** float(result.best_theta[_n_phys_2star])
         bb_l_lsun_best_2s = 10.0 ** float(result.best_theta[_n_phys_2star + 1])
-    bands = [r.band for r in rows]
+    bands = [r.band for r in rows if r.band not in _GAIA_CONSTRAINT_BANDS]
     bps = bandpasses
     if bps is None and synth_2star is None:
         bps = load_bandpasses_for_bands(bands)
