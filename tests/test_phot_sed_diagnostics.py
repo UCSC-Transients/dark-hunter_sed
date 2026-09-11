@@ -24,7 +24,6 @@ from darkhunter_sed.phot_sed_diagnostics import (
     _wave_um,
     _sorted_bands_by_wave,
     plot_sed_panel,
-    plot_wd_corner,
     plot_model_comparison,
     save_all_diagnostics,
 )
@@ -58,62 +57,6 @@ def _make_model_preds(rows: list[PhotRow]) -> dict[str, dict[str, float]]:
             preds[r.band] = r.mag + 0.1  # slight offset from truth
     return {"1-star": preds}
 
-
-def _make_wd_result(
-    atm_type: str = "DA",
-    ifmr: str = "MIST",
-    n_samples: int = 40,
-    seed: int = 42,
-) -> object:
-    """
-    Construct a synthetic WDFitResult-like object with all required arrays.
-
-    Returns a simple namespace that matches the WDFitResult field interface
-    expected by plot_wd_corner.
-    """
-    import types
-
-    rng = np.random.default_rng(seed)
-    samples = np.column_stack([
-        rng.uniform(1.0, 10.0, n_samples),   # parallax_mas
-        rng.uniform(0.0, 1.0, n_samples),    # Av
-        rng.uniform(5000.0, 20000.0, n_samples),  # teff_wd (unused in corner)
-        rng.uniform(7.5, 9.0, n_samples),    # logg_wd  (unused in corner)
-    ])
-    # Reorder to match _PARAM_NAMES = ("teff_wd", "logg_wd", "av", "parallax_mas")
-    samples_ordered = np.column_stack([
-        samples[:, 2],  # teff
-        samples[:, 3],  # logg
-        samples[:, 1],  # av
-        samples[:, 0],  # parallax
-    ])
-    weights = rng.dirichlet(np.ones(n_samples))
-    m_wd = rng.uniform(0.5, 1.0, n_samples)
-    m_i  = rng.uniform(1.5, 4.0, n_samples)
-    t_cool_yr = rng.uniform(1e8, 5e9, n_samples)
-
-    res = types.SimpleNamespace(
-        atm_type=atm_type,
-        ifmr=ifmr,
-        logevidence=-42.0,
-        samples=samples_ordered,
-        weights=weights,
-        m_wd_samples=m_wd,
-        m_i_samples=m_i,
-        m_i_unc_ifmr_samples=rng.uniform(0.1, 0.5, n_samples),
-        extrap_mask=np.zeros(n_samples, dtype=bool),
-        t_cool_yr_samples=t_cool_yr,
-    )
-    return res
-
-
-def _make_prior_bounds() -> object:
-    """Return a minimal WDPriorBounds-compatible namespace."""
-    import types
-    return types.SimpleNamespace(
-        parallax_mas=(0.1, 100.0),
-        av=(0.0, 5.0),
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -218,57 +161,6 @@ def test_plot_sed_panel_unknown_band_skipped() -> None:
 
 
 # ---------------------------------------------------------------------------
-# plot_wd_corner
-# ---------------------------------------------------------------------------
-
-def test_plot_wd_corner_single_result() -> None:
-    """Single WDFitResult must produce a valid Figure."""
-    import matplotlib.pyplot as plt
-    import matplotlib.figure
-    res = _make_wd_result("DA", "MIST")
-    bounds = _make_prior_bounds()
-    fig = plot_wd_corner([res], bounds, gaia_id="wd_test")
-    assert isinstance(fig, matplotlib.figure.Figure)
-    plt.close(fig)
-
-
-def test_plot_wd_corner_four_results() -> None:
-    """Four WD variants must all overlay without error."""
-    import matplotlib.pyplot as plt
-    bounds = _make_prior_bounds()
-    results = [
-        _make_wd_result("DA", "MIST",   seed=1),
-        _make_wd_result("DA", "PARSEC", seed=2),
-        _make_wd_result("DB", "MIST",   seed=3),
-        _make_wd_result("DB", "PARSEC", seed=4),
-    ]
-    fig = plot_wd_corner(results, bounds, gaia_id="wd_all")
-    assert fig is not None
-    plt.close(fig)
-
-
-def test_plot_wd_corner_saves_file(tmp_path: Path) -> None:
-    import matplotlib.pyplot as plt
-    res = _make_wd_result()
-    bounds = _make_prior_bounds()
-    out = tmp_path / "corner.pdf"
-    plot_wd_corner([res], bounds, outpath=out)
-    assert out.is_file()
-    plt.close("all")
-
-
-def test_plot_wd_corner_nan_mi() -> None:
-    """NaN m_i_samples must not raise (IFMR extrapolation)."""
-    import matplotlib.pyplot as plt
-    res = _make_wd_result()
-    res.m_i_samples[:5] = np.nan  # make some samples out-of-IFMR
-    bounds = _make_prior_bounds()
-    fig = plot_wd_corner([res], bounds)
-    assert fig is not None
-    plt.close(fig)
-
-
-# ---------------------------------------------------------------------------
 # plot_model_comparison
 # ---------------------------------------------------------------------------
 
@@ -342,26 +234,6 @@ def test_save_all_diagnostics_phoenix(tmp_path: Path) -> None:
     assert "corner" not in paths
 
 
-def test_save_all_diagnostics_wd(tmp_path: Path) -> None:
-    """save_all_diagnostics must write corner file when wd_results is provided."""
-    rows = _make_rows()
-    preds: dict = {}
-    scores: dict = {}
-    results = [_make_wd_result("DA", "MIST")]
-    bounds = _make_prior_bounds()
-    paths = save_all_diagnostics(
-        rows=rows,
-        model_preds=preds,
-        model_scores=scores,
-        gaia_id="wd_target",
-        wd_results=results,
-        wd_prior_bounds=bounds,
-        out_dir=tmp_path,
-    )
-    assert "corner" in paths
-    assert paths["corner"].is_file()
-
-
 # ---------------------------------------------------------------------------
 # CLI --plot flag smoke test
 # ---------------------------------------------------------------------------
@@ -380,15 +252,3 @@ def test_cli_no_plot_flag_default() -> None:
     parser = _build_parser()
     args = parser.parse_args(["9999999"])
     assert args.plot is False
-
-
-# ---------------------------------------------------------------------------
-# WDFitResult t_cool_yr_samples field
-# ---------------------------------------------------------------------------
-
-def test_wd_fit_result_has_t_cool() -> None:
-    """WDFitResult dataclass must have a t_cool_yr_samples field."""
-    import dataclasses
-    from darkhunter_sed.wd_model import WDFitResult
-    field_names = {f.name for f in dataclasses.fields(WDFitResult)}
-    assert "t_cool_yr_samples" in field_names
