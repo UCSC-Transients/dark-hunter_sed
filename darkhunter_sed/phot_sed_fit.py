@@ -44,6 +44,11 @@ DEFAULT_AFE_BOUNDS: tuple[float, float] = (-0.2, 0.6)
 DEFAULT_AV_BOUNDS: tuple[float, float] = (0.0, 5.0)
 DEFAULT_PARALLAX_BOUNDS: tuple[float, float] = (0.1, 100.0)  # mas
 DEFAULT_SIGMA_INT_BOUNDS: tuple[float, float] = (0.0, 0.5)  # intrinsic scatter, mag
+# Model magnitude at/above this value means the forward model predicts ~zero
+# flux in that band (see phoenix_grid.synthesize_mags's 99.0 sentinel return).
+# The detection is skipped from the likelihood rather than treated as a huge
+# residual — plotting code must apply the same skip (see issue #56).
+SENTINEL_MAG_THRESHOLD: float = 90.0
 # Tighter mass prior for 1-star SED fits.  M > 2.0 gives Teff > PHOENIX upper limit
 # (12 000 K).  The lower bound 0.5 covers late K/M dwarfs; use
 # OneStarPriorBounds(mass=...) to override for targets outside this range.
@@ -221,7 +226,7 @@ def photometry_loglike(
             m_mod = 99.0
         err = math.sqrt(err_raw**2 + _PHOT_ERR_FLOOR**2 + sigma_int_sq)
         if row.flag == FLAG_DETECTION:
-            if m_mod >= 90.0:
+            if m_mod >= SENTINEL_MAG_THRESHOLD:
                 # Photospheric model predicts no flux; detection may be a WD
                 # companion or accretion.  The 1-star model cannot explain this
                 # band so we skip it here; the 2-star / WD model handles it.

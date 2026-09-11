@@ -43,6 +43,7 @@ import matplotlib.gridspec as gridspec
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from darkhunter_sed.phot_sed_fit import SENTINEL_MAG_THRESHOLD
 from darkhunter_sed.phot_sed_io import read_photometry_fits, FLAG_UPPER_LIMIT
 
 # Approximate effective wavelength in microns (blue → red)
@@ -255,6 +256,12 @@ def _plot_sed_panels(ax_sed, ax_res, best_mags: dict[str, float],
     for r in dets:
         w = wav_for_band(r.band)
         if w is None or r.band not in best_mags:
+            continue
+        if best_mags[r.band] >= SENTINEL_MAG_THRESHOLD:
+            # Model predicts ~zero flux in this band; the fit likelihood
+            # skips such detections entirely (see photometry_loglike), so
+            # plotting a residual here would show a huge, meaningless pull
+            # for a point that never influenced the posterior (issue #56).
             continue
         err = float(r.err) if r.err else _PHOT_ERR_FLOOR
         sigma_eff = np.hypot(err, _PHOT_ERR_FLOOR)
@@ -477,6 +484,11 @@ def _plot_sed_2star(summary: dict, phot_path: Path | None, pdf_path: Path,
         for r in dets:
             w = wav_for_band(r.band)
             if w is None or r.band not in mags_combined:
+                continue
+            if mags_combined[r.band] >= SENTINEL_MAG_THRESHOLD:
+                # See _plot_sed_panels: photometry_loglike skips sentinel-model
+                # detections from the fit, so they must not get a pull here
+                # either (issue #56).
                 continue
             err = float(r.err) if r.err else _PHOT_ERR_FLOOR
             pull = (float(r.mag) - mags_combined[r.band]) / np.hypot(err, _PHOT_ERR_FLOOR)
