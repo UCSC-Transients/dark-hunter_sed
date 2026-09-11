@@ -1,15 +1,12 @@
 """
 Path-2 photometry SED diagnostic plots.
 
-Three publication-quality figures produced after any ``darkhunter-sed-phot``
+Two publication-quality figures produced after any ``darkhunter-sed-phot``
 run when ``--plot`` is requested:
 
 1. **SED panel** — observed photometry with upper-limit hats, per-model
    best-fit synth-phot curves, and a residual sub-panel.
-2. **WD corner** — posterior corner (parallax, Av, t_cool, M_WD, M_i) with
-   per-model overlays and uniform-prior step curves on the free-parameter
-   diagonal panels.
-3. **Model-comparison bar chart** — ΔlnZ and BIC grouped bars for all
+2. **Model-comparison bar chart** — ΔlnZ and BIC grouped bars for all
    models; IFMR variants shown by bar hatching.
 
 Limits
@@ -303,194 +300,6 @@ def _format_wave_axis(ax: "Axes") -> None:
 
 
 # ---------------------------------------------------------------------------
-# plot_wd_corner
-# ---------------------------------------------------------------------------
-
-def plot_wd_corner(
-    wd_results: list,
-    prior_bounds: object,
-    *,
-    gaia_id: str = "",
-    outpath: Path | None = None,
-) -> "Figure":
-    """
-    WD posterior corner plot: parallax, Av, t_cool, M_WD, M_i.
-
-    Parameters
-    ----------
-    wd_results :
-        List of :class:`~darkhunter_sed.wd_model.WDFitResult` objects from
-        :func:`~darkhunter_sed.wd_model.run_wd_fit`.
-    prior_bounds :
-        :class:`~darkhunter_sed.wd_model.WDPriorBounds` instance; used to
-        draw uniform prior step curves on the free-parameter (parallax, Av)
-        diagonal panels.
-    gaia_id :
-        Source id string; used in the figure title.
-    outpath :
-        If given, save the figure to this path.
-
-    Returns
-    -------
-    matplotlib.figure.Figure
-
-    Limits
-    ------
-    Panels for derived quantities (t_cool, M_WD, M_i) show only the
-    posterior histogram; the analytic prior is unavailable without the full
-    Bergeron grid.  Samples where M_i is NaN (outside IFMR range) are
-    excluded from M_i panels.
-    For *wd_results* with more than one entry, each result is overlaid with
-    its own color and labelled by ``"{atm_type}-{ifmr}"``.
-    """
-    import matplotlib.pyplot as plt
-    import matplotlib.patches as mpatches
-
-    # Axis labels and data extractors.  Each entry: (label, fn(res) -> 1D array).
-    _axes: list[tuple[str, object]] = [
-        ("parallax (mas)",    lambda r: r.samples[:, 3]),
-        ("Av (mag)",          lambda r: r.samples[:, 2]),
-        ("t_cool (Gyr)",      lambda r: r.t_cool_yr_samples * 1e-9),
-        ("M_WD (M☉)",         lambda r: r.m_wd_samples),
-        ("Mi (M☉)",           lambda r: _finite_only(r.m_i_samples)),
-    ]
-    ndim = len(_axes)
-
-    fig, axes = plt.subplots(ndim, ndim, figsize=(8, 7))
-    fig.subplots_adjust(hspace=0.05, wspace=0.05)
-
-    # Colors for each result.
-    palette = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728"]
-    legend_handles = []
-
-    for k, res in enumerate(wd_results):
-        color = palette[k % len(palette)]
-        label = f"{res.atm_type}-{res.ifmr}"
-        legend_handles.append(mpatches.Patch(color=color, label=label))
-        w = res.weights / res.weights.sum()
-
-        data_cols: list[NDArray[np.float64]] = []
-        for _, fn in _axes:
-            arr = np.asarray(fn(res), dtype=np.float64)
-            data_cols.append(arr)
-
-        for row in range(ndim):
-            for col in range(ndim):
-                ax = axes[row, col]
-                _hide_ticks_if_interior(ax, row, col, ndim)
-
-                if col > row:
-                    ax.set_visible(False)
-                    continue
-
-                x_arr = data_cols[col]
-                finite_x = np.isfinite(x_arr)
-
-                if row == col:
-                    # 1D marginal histogram.
-                    _weighted_hist(
-                        ax, x_arr[finite_x], w[finite_x], color=color, alpha=0.5,
-                    )
-                    # Prior overlay for free parameters (parallax=col 0, Av=col 1).
-                    if col == 0:  # parallax
-                        _plot_uniform_prior(ax, prior_bounds.parallax_mas)
-                    elif col == 1:  # Av
-                        _plot_uniform_prior(ax, prior_bounds.av)
-                    ax.set_yticks([])
-                else:
-                    # 2D scatter.
-                    y_arr = data_cols[row]
-                    finite_xy = np.isfinite(x_arr) & np.isfinite(y_arr)
-                    if finite_xy.sum() > 1:
-                        idx = np.random.choice(
-                            np.where(finite_xy)[0],
-                            size=min(500, finite_xy.sum()),
-                            replace=False,
-                            p=None,
-                        )
-                        ax.scatter(
-                            x_arr[idx], y_arr[idx],
-                            c=color, s=1, alpha=0.3, rasterized=True,
-                        )
-
-                # Axis labels on edges only.
-                if col == 0:
-                    ax.set_ylabel(_axes[row][0], fontsize=6)
-                if row == ndim - 1:
-                    ax.set_xlabel(_axes[col][0], fontsize=6)
-
-    title = f"WD corner  {gaia_id}" if gaia_id else "WD corner"
-    fig.suptitle(title, fontsize=9, y=1.01)
-    fig.legend(handles=legend_handles, loc="upper right", fontsize=7, ncol=2)
-
-    if outpath is not None:
-        fig.savefig(outpath, dpi=150, bbox_inches="tight")
-    return fig
-
-
-def _finite_only(arr: NDArray[np.float64]) -> NDArray[np.float64]:
-    """Return a copy of *arr* with NaN/inf replaced by NaN (kept for masking)."""
-    return np.where(np.isfinite(arr), arr, np.nan)
-
-
-def _weighted_hist(
-    ax: "Axes",
-    data: NDArray[np.float64],
-    weights: NDArray[np.float64],
-    *,
-    color: str,
-    alpha: float,
-    bins: int = 30,
-) -> None:
-    """
-    Draw a weighted histogram on *ax*.
-
-    Parameters
-    ----------
-    data :
-        1-D finite data array.
-    weights :
-        Sample weights (same length as *data*); need not sum to 1.
-    color, alpha :
-        Bar face color and transparency.
-    bins :
-        Number of histogram bins.
-    """
-    if data.size < 2:
-        return
-    w_norm = weights / weights.sum() if weights.sum() > 0 else weights
-    ax.hist(data, bins=bins, weights=w_norm, color=color, alpha=alpha, density=False)
-
-
-def _plot_uniform_prior(ax: "Axes", bounds: tuple[float, float]) -> None:
-    """
-    Draw a uniform prior as a horizontal step line on *ax*.
-
-    Parameters
-    ----------
-    ax :
-        Matplotlib axes (a 1-D marginal histogram panel).
-    bounds :
-        ``(lo, hi)`` of the uniform prior.
-    """
-    lo, hi = bounds
-    ymax = ax.get_ylim()[1] if ax.get_ylim()[1] > 0 else 1.0
-    xs = [lo, lo, hi, hi]
-    ys = [0, ymax, ymax, 0]
-    ax.step(xs, ys, where="post", color="k", lw=1.0, ls="--", alpha=0.6)
-
-
-def _hide_ticks_if_interior(
-    ax: "Axes", row: int, col: int, ndim: int
-) -> None:
-    """Remove x/y tick labels for interior panels."""
-    if row < ndim - 1:
-        ax.xaxis.set_visible(False)
-    if col > 0:
-        ax.yaxis.set_visible(False)
-
-
-# ---------------------------------------------------------------------------
 # plot_model_comparison
 # ---------------------------------------------------------------------------
 
@@ -594,12 +403,10 @@ def save_all_diagnostics(
     model_scores: dict[str, dict[str, float | None]],
     *,
     gaia_id: str = "",
-    wd_results: list | None = None,
-    wd_prior_bounds: object | None = None,
     out_dir: Path | str,
 ) -> dict[str, Path]:
     """
-    Save all three diagnostic figures for one target.
+    Save all diagnostic figures for one target.
 
     Parameters
     ----------
@@ -612,20 +419,14 @@ def save_all_diagnostics(
         :func:`plot_model_comparison`.
     gaia_id :
         Source id; used in titles and output filenames.
-    wd_results :
-        WD fit results; if given, :func:`plot_wd_corner` is also saved.
-    wd_prior_bounds :
-        :class:`~darkhunter_sed.wd_model.WDPriorBounds`; required when
-        *wd_results* is provided.
     out_dir :
         Directory for output files (created if absent).
 
     Returns
     -------
     dict[str, Path]
-        Mapping ``{"sed": path, "corner": path, "comparison": path}`` for
-        the saved figure files.  ``"corner"`` is absent if *wd_results* is
-        ``None``.
+        Mapping ``{"sed": path, "comparison": path}`` for the saved figure
+        files.
 
     Limits
     ------
@@ -647,10 +448,5 @@ def save_all_diagnostics(
     cmp_path = out / f"{stem}_model_comparison.pdf"
     plot_model_comparison(model_scores, gaia_id=gaia_id, outpath=cmp_path)
     paths["comparison"] = cmp_path
-
-    if wd_results is not None and wd_prior_bounds is not None:
-        corner_path = out / f"{stem}_wd_corner.pdf"
-        plot_wd_corner(wd_results, wd_prior_bounds, gaia_id=gaia_id, outpath=corner_path)
-        paths["corner"] = corner_path
 
     return paths

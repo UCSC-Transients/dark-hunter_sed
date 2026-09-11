@@ -9,7 +9,6 @@ Produces per fit:
 Supported stem types:
   output/phot_sed/Gaia_DR3_<id>_1star      1-star Phoenix fit
   output/phot_sed/Gaia_DR3_<id>_2star      2-star Phoenix fit
-  output/phot_sed/<id>/wd/wd_<ATM>_<IFMR>    WD-only Bergeron fit
   output/phot_sed/<id>/wd/wdstar_<ATM>_<IFMR> WD+companion fit
 
 Usage:
@@ -20,10 +19,9 @@ Usage:
     /opt/local/bin/python3 scripts/plot_phot_sed_diagnostics.py \\
         output/phot_sed/Gaia_DR3_*_1star
 
-    # WD fits in a gaia-id subdirectory:
+    # WD+companion fits in a gaia-id subdirectory:
     /opt/local/bin/python3 scripts/plot_phot_sed_diagnostics.py \\
         --wd-dir ~/stellar/wd \\
-        output/phot_sed/6475655404885617920/wd/wd_DA_MIST \\
         output/phot_sed/6475655404885617920/wd/wdstar_DA_MIST
 
 The script accepts glob patterns or explicit stems (with or without
@@ -59,21 +57,14 @@ _BAND_ORDER = sorted(_BAND_WAV, key=_BAND_WAV.__getitem__)
 
 _PHOT_ERR_FLOOR = 0.02  # added in quadrature for residual computation
 
-_WD_PARAM_NAMES = ["teff_wd", "logg_wd", "Av", "parallax"]
-
 
 # ---------------------------------------------------------------------------
 # NPZ type detection
 # ---------------------------------------------------------------------------
 
-def _is_wdonly(d: np.lib.npyio.NpzFile) -> bool:
-    """WD-only Bergeron fit: has m_wd but no stored param_names."""
-    return "m_wd" in d.files and "param_names" not in d.files
-
-
 def _is_wdstar(d: np.lib.npyio.NpzFile) -> bool:
-    """WD+companion fit: has m_wd AND stored param_names (8-param)."""
-    return "m_wd" in d.files and "param_names" in d.files
+    """WD+companion fit: has m_wd (Bergeron component)."""
+    return "m_wd" in d.files
 
 
 # ---------------------------------------------------------------------------
@@ -93,33 +84,8 @@ def _load(stem: Path) -> tuple[dict, np.ndarray, np.ndarray | None, list[str], n
 
     if _is_wdstar(d):
         return _load_wdstar(d, summary)
-    if _is_wdonly(d):
-        return _load_wdonly(d, summary)
     # 1-star / 2-star Phoenix fit
     return summary, d["samples"], d["logl"], list(d["param_names"]), None
-
-
-def _load_wdonly(d: np.lib.npyio.NpzFile, summary: dict):
-    """Load WD-only Bergeron posterior: 4 params + M_WD + M_i."""
-    raw = np.asarray(d["samples"])          # (N, 4)
-    m_wd = np.asarray(d["m_wd"]).reshape(-1, 1)
-    m_i  = np.asarray(d["m_i"]).reshape(-1, 1)
-    weights = np.asarray(d["weights"])
-    full = np.hstack([raw, m_wd, m_i])
-    mask = np.all(np.isfinite(full), axis=1)
-    frac_finite = mask.sum() / max(len(mask), 1)
-    if frac_finite < 0.5:
-        samples = np.hstack([raw, m_wd])
-        weights = np.asarray(d["weights"])
-        param_names = _WD_PARAM_NAMES + ["M_WD"]
-        if frac_finite > 0.0:
-            print(f"  WD: only {frac_finite:.0%} of samples have finite M_i "
-                  f"(IFMR in range); M_i excluded from corner.")
-    else:
-        samples = full[mask]
-        weights = weights[mask]
-        param_names = _WD_PARAM_NAMES + ["M_WD", "M_i"]
-    return summary, samples, None, param_names, weights
 
 
 def _load_wdstar(d: np.lib.npyio.NpzFile, summary: dict):
@@ -501,51 +467,6 @@ def _plot_sed_2star(summary: dict, phot_path: Path | None, pdf_path: Path,
 
 
 # ---------------------------------------------------------------------------
-# WD-only Bergeron SED
-# ---------------------------------------------------------------------------
-
-def _plot_sed_wd(summary: dict, phot_path: Path | None, pdf_path: Path,
-                 wd_dir: Path | None) -> None:
-    if wd_dir is None:
-        print("  WD SED: --wd-dir not set — skipping")
-        return
-
-    atm_type = summary.get("atm_type", "DA")
-    teff   = summary.get("teff_median")
-    logg   = summary.get("logg_median")
-    av     = summary.get("av_median")
-    plx    = summary.get("parallax_median")
-    if any(v is None for v in (teff, logg, av, plx)):
-        print("  WD SED: missing median parameters in summary — skipping")
-        return
-    dist_pc = 1000.0 / plx
-
-    try:
-        from darkhunter_sed.bergeron_wd import BergeronGrid
-        grid = BergeronGrid.from_dir(wd_dir, atm_type)
-        result = grid.synth_phot(teff, logg, av, dist_pc)
-    except Exception as exc:
-        print(f"  WD SED: BergeronGrid error ({exc}) — skipping")
-        return
-
-    best_mags: dict[str, float] = result["mags"]
-    dets, uls = _get_obs(phot_path, set(best_mags))
-    has_res = bool(dets)
-    fig, ax_sed, ax_res = _make_sed_figure(has_res)
-
-    gaia_id = summary.get("gaia_id", "")
-    ifmr = summary.get("ifmr", "")
-    title = f"Gaia DR3 {gaia_id}  [WD-{atm_type}/{ifmr}]  Teff={teff:.0f} K  d={dist_pc:.0f} pc"
-    _plot_sed_panels(ax_sed, ax_res, best_mags, dets, uls, title)
-
-    if ax_res is None:
-        fig.tight_layout()
-    fig.savefig(pdf_path, bbox_inches="tight")
-    plt.close(fig)
-    print(f"  SED  → {pdf_path}")
-
-
-# ---------------------------------------------------------------------------
 # WD+companion SED (WD component only via Bergeron; star needs PHOENIX)
 # ---------------------------------------------------------------------------
 
@@ -619,11 +540,9 @@ def _get_gaia_id(summary: dict, stem: Path) -> str:
 
 
 def _model_type(summary: dict, d: np.lib.npyio.NpzFile) -> str:
-    """Return one of '1star', '2star', 'wdonly', 'wdstar'."""
+    """Return one of '1star', '2star', 'wdstar'."""
     if _is_wdstar(d):
         return "wdstar"
-    if _is_wdonly(d):
-        return "wdonly"
     return summary.get("model", "1star")
 
 
@@ -700,8 +619,6 @@ def main(argv: list[str] | None = None) -> int:
         elif mtype == "2star":
             _plot_sed_2star(summary, phot_path, sed_pdf,
                             mist_nn=args.mist_nn, phoenix_dir=args.phoenix_dir)
-        elif mtype == "wdonly":
-            _plot_sed_wd(summary, phot_path, sed_pdf, wd_dir)
         elif mtype == "wdstar":
             _plot_sed_wdstar(summary, phot_path, sed_pdf, wd_dir)
 
