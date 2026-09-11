@@ -118,8 +118,10 @@ def _build_parser() -> argparse.ArgumentParser:
         default=1,
         metavar="N",
         help=(
-            "Subsample the bandpass wavelength grid by N before PHOENIX integration "
-            "(default 1 = full resolution). Values 4–10 give ~4–10× speedup with "
+            "Subsample both the native PHOENIX HiRes grid (0.01 Angstrom spacing) "
+            "and the bandpass wavelength grid by N before PHOENIX integration "
+            "(default 1 = full resolution). Values 8-100+ give large speedups "
+            "(each new grid corner is loaded/interpolated N times faster) with "
             "negligible accuracy loss for broad-band photometry — useful for a fast "
             "exploratory run; rerun at stride=1 for final results."
         ),
@@ -421,7 +423,7 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         mist_nn  = resolve_mist_nn_path(args.mist_nn)
         predictor = load_misty_predictor(mist_nn)
-        grid_phx  = PhoenixGrid(root=args.phoenix_dir)
+        grid_phx  = PhoenixGrid(root=args.phoenix_dir, hires_stride=int(args.stride))
         bandpasses = load_bandpasses_for_bands(
             [r.band for r in rows
              if r.band not in _GAIA_CONSTRAINT_BANDS and r.band in BAND_REGISTRY]
@@ -447,7 +449,7 @@ def main(argv: list[str] | None = None) -> int:
 
         mist_nn = resolve_mist_nn_path(args.mist_nn)
         predictor = load_misty_predictor(mist_nn)
-        grid_phx = PhoenixGrid(root=args.phoenix_dir)
+        grid_phx = PhoenixGrid(root=args.phoenix_dir, hires_stride=int(args.stride))
         bandpasses = load_bandpasses_for_bands(
             [r.band for r in rows if r.band not in _GAIA_CONSTRAINT_BANDS]
         )

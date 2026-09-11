@@ -181,7 +181,7 @@ def load_phoenix_wavelength(
     path = root_p / _WAVE_NAME
     if not path.is_file():
         raise FileNotFoundError(f"PHOENIX wavelength file missing: {path}")
-    data = fits.getdata(path)
+    data = fits.getdata(path, memmap=True)
     wave = np.asarray(data, dtype=np.float64).reshape(-1)
     if wave.size < 2:
         raise ValueError(f"Wavelength array too short in {path}")
@@ -192,6 +192,7 @@ def load_phoenix_flux(
     path: Path | str,
     *,
     to_flam: bool = True,
+    stride: int = 1,
 ) -> NDArray[np.float64]:
     """
     Load a single PHOENIX HiRes flux array.
@@ -203,6 +204,10 @@ def load_phoenix_flux(
     to_flam :
         If True (default), convert ``erg/s/cm^2/cm`` → ``erg/s/cm^2/Å`` by
         dividing by ``1e8``. If False, return native surface flux.
+    stride :
+        Subsample the native array by this factor (``data[::stride]``)
+        *before* casting to float64, so the copy is only ``1/stride`` the
+        size. Default ``1`` (no subsampling).
 
     Returns
     -------
@@ -211,12 +216,18 @@ def load_phoenix_flux(
 
     Limits
     ------
-    Reads primary HDU only. Does not apply radius/distance scaling or
-    extinction.
+    Reads primary HDU only via a memory-mapped file (``fits.open(...,
+    memmap=True)``) rather than ``fits.getdata`` — measured ~3-8x faster per
+    file for this data (see issue #65); avoids astropy's extra validation
+    overhead on top of the raw read. Does not apply radius/distance scaling
+    or extinction.
     """
     path = Path(path)
-    data = fits.getdata(path)
-    flux = np.asarray(data, dtype=np.float64).reshape(-1)
+    with fits.open(path, memmap=True) as hdul:
+        data = hdul[0].data
+        if stride > 1:
+            data = data[::stride]
+        flux = np.asarray(data, dtype=np.float64).reshape(-1)
     if to_flam:
         flux = flux / _CM_TO_AA
     return flux
@@ -351,6 +362,16 @@ class PhoenixGrid:
         Optional ``callable(path) -> flux`` for tests (bypass FITS I/O).
     to_flam :
         Convert native ``/cm`` flux to FLAM when loading.
+    hires_stride :
+        Subsample the native HiRes grid (0.01 Å spacing) by this factor at
+        load time, before any interpolation — e.g. ``8`` keeps every 8th
+        pixel (0.08 Å spacing). Applied once to :attr:`wavelength` at
+        construction and to every corner's raw flux array in :meth:`_load`,
+        so the two always stay shape-consistent. Default ``1`` (no
+        subsampling) is fully backward compatible. Broadband filters are
+        hundreds to thousands of Å wide, so even large strides lose no
+        fidelity for photometric synthesis; this only shrinks the array that
+        every cache miss must load from disk and interpolate against.
 
     Limits
     ------
@@ -378,12 +399,14 @@ class PhoenixGrid:
         to_flam: bool = True,
         flux_cache_size: int = _DEFAULT_FLUX_CACHE_SIZE,
         hires_cache_size: int = _DEFAULT_HIRES_CACHE_SIZE,
+        hires_stride: int = 1,
     ) -> None:
         self.root = phoenix_dir(root)
         self.to_flam = bool(to_flam)
         self._flux_loader = flux_loader
         self._hires_cache_size = max(int(hires_cache_size), 0)
         self._flux_cache_size = max(int(flux_cache_size), 0)
+        self._hires_stride = max(int(hires_stride), 1)
         self._flux_cache: OrderedDict[Path, NDArray[np.float64]] = OrderedDict()
         # Optional photometry λ grid: dynesty evaluates SED here, not on HiRes.
         self._phot_wave: NDArray[np.float64] | None = None
@@ -393,6 +416,8 @@ class PhoenixGrid:
             self.wavelength = np.asarray(wavelength, dtype=np.float64).reshape(-1)
         else:
             self.wavelength = load_phoenix_wavelength(self.root)
+        if self._hires_stride > 1:
+            self.wavelength = self.wavelength[:: self._hires_stride]
         if points is not None:
             self._points = list(points)
         else:
@@ -488,8 +513,14 @@ class PhoenixGrid:
             return cached
         if self._flux_loader is not None:
             flux = np.asarray(self._flux_loader(point.path), dtype=np.float64)
+            if self._hires_stride > 1:
+                flux = flux[:: self._hires_stride]
         else:
-            flux = load_phoenix_flux(point.path, to_flam=self.to_flam)
+            # Stride applied inside load_phoenix_flux, before the float64
+            # cast, so the copy is 1/stride the size (see issue #65).
+            flux = load_phoenix_flux(
+                point.path, to_flam=self.to_flam, stride=self._hires_stride
+            )
         if flux.shape != self.wavelength.shape:
             raise ValueError(
                 f"Flux length {flux.size} != wavelength {self.wavelength.size} "
