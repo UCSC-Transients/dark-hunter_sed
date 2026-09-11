@@ -297,14 +297,14 @@ def test_fit_2star_dynesty_smoke() -> None:
         jit_warmup=False,
     )
     assert isinstance(result, FitResult2Star)
-    assert result.n_free == len(TWO_STAR_PARAM_NAMES)
-    assert result.n_free == 7
+    assert result.n_free == len(TWO_STAR_PARAM_NAMES) + 1  # +1 for sigma_int
+    assert result.n_free == 8
     assert math.isfinite(result.logz)
     assert math.isfinite(result.bic)
     assert result.ln_l_max > -np.inf
     assert result.samples.ndim == 2
-    assert result.samples.shape[1] == 7
-    assert result.param_names == TWO_STAR_PARAM_NAMES
+    assert result.samples.shape[1] == 8
+    assert result.param_names == TWO_STAR_PARAM_NAMES + ("sigma_int",)
 
 
 def test_fit_2star_dynesty_excludes_gaia_constraint_bands() -> None:
@@ -361,7 +361,7 @@ def test_run_2star_fit_writes_outputs(tmp_path: Path) -> None:
     assert paths["samples_npz"].is_file()
     summary = json.loads(paths["summary_json"].read_text(encoding="utf-8"))
     assert summary["model"] == "2star"
-    assert summary["n_free"] == 7
+    assert summary["n_free"] == 8
     assert "logz" in summary and "bic" in summary
     assert summary["best_theta"]["EEP1"] == result.best_theta[0]
     assert "eep2_solved" in summary
@@ -412,9 +412,9 @@ def test_cli_2star_missing_phot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 
 
 def test_twostar_prior_bounds_defaults() -> None:
-    """TwoStarPriorBounds default as_list() returns 7 bounds."""
+    """TwoStarPriorBounds default as_list() returns 8 bounds (incl. sigma_int)."""
     pb = TwoStarPriorBounds()
     bl = pb.as_list()
-    assert len(bl) == 7
+    assert len(bl) == 8
     for lo, hi in bl:
         assert lo < hi
