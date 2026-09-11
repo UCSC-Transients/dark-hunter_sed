@@ -892,12 +892,13 @@ class TwoStarPriorBounds:
     afe: tuple[float, float] = DEFAULT_AFE_BOUNDS
     a_v: tuple[float, float] = DEFAULT_AV_BOUNDS
     parallax_mas: tuple[float, float] = DEFAULT_PARALLAX_BOUNDS
+    sigma_int: tuple[float, float] = DEFAULT_SIGMA_INT_BOUNDS
 
     def as_list(self) -> list[tuple[float, float]]:
-        """Return bounds in dynesty parameter order."""
+        """Return bounds in dynesty parameter order (physical params + sigma_int)."""
         return [
             self.eep1, self.mass1, self.mass2,
-            self.feh, self.afe, self.a_v, self.parallax_mas,
+            self.feh, self.afe, self.a_v, self.parallax_mas, self.sigma_int,
         ]
 
 
@@ -1018,6 +1019,7 @@ def fit_2star_dynesty(
             afe=prior.afe,
             a_v=(prior_spec.av.av_lo, prior_spec.av.av_hi),
             parallax_mas=(prior_spec.plx.plx_lo, prior_spec.plx.plx_hi),
+            sigma_int=prior.sigma_int,
         )
     use_bb_2star = bb_bounds is not None
     if use_bb_2star:
@@ -1032,9 +1034,10 @@ def fit_2star_dynesty(
     if not phot_rows:
         raise ValueError("rows contains only Gaia constraints; need photometric bands too")
     bands = [r.band for r in phot_rows]
-    ndim = len(TWO_STAR_PARAM_NAMES) + (len(BB_PARAM_NAMES) if use_bb_2star else 0)
-    _2S_BB_T_IDX = len(TWO_STAR_PARAM_NAMES)
-    _2S_BB_L_IDX = len(TWO_STAR_PARAM_NAMES) + 1
+    _2S_SIGMA_INT_IDX = len(TWO_STAR_PARAM_NAMES)
+    ndim = len(TWO_STAR_PARAM_NAMES) + 1 + (len(BB_PARAM_NAMES) if use_bb_2star else 0)
+    _2S_BB_T_IDX = len(TWO_STAR_PARAM_NAMES) + 1
+    _2S_BB_L_IDX = len(TWO_STAR_PARAM_NAMES) + 2
 
     bps = bandpasses
     if bps is None and synth_2star is None:
@@ -1054,7 +1057,7 @@ def fit_2star_dynesty(
         _mid[2] = min(_mid[2], _mid[1])
         try:
             predict_2star_phot(
-                _mid,
+                _mid[:len(TWO_STAR_PARAM_NAMES)],  # physical params only (no sigma_int/BB)
                 bands,
                 mist_predictor=mist_predictor,
                 phoenix_grid=phoenix_grid,
@@ -1084,9 +1087,19 @@ def fit_2star_dynesty(
         # space and can leave all live points on the likelihood plateau.
         if theta[2] > theta[1]:
             theta[1], theta[2] = theta[2], theta[1]
+        # sigma_int: exponential prior (scale=_SIGMA_INT_PRIOR_SCALE), same as
+        # the 1-star fit — a flat prior lets the sampler push sigma_int to its
+        # ceiling to absorb photometric residuals.
+        u_sig = float(u[_2S_SIGMA_INT_IDX])
+        sig_hi = float(bound_list[_2S_SIGMA_INT_IDX][1])
+        trunc = 1.0 - math.exp(-sig_hi / _SIGMA_INT_PRIOR_SCALE)
+        theta[_2S_SIGMA_INT_IDX] = -_SIGMA_INT_PRIOR_SCALE * math.log(
+            max(1.0 - u_sig * trunc, 1e-300)
+        )
         return theta
 
     def loglike(theta: NDArray[np.floating]) -> float:
+        sigma_int = float(theta[_2S_SIGMA_INT_IDX])
         bb_t_k_2s: float | None = None
         bb_l_lsun_2s: float | None = None
         if use_bb_2star:
@@ -1094,7 +1107,7 @@ def fit_2star_dynesty(
             bb_l_lsun_2s = 10.0 ** float(theta[_2S_BB_L_IDX])
         try:
             pred = predict_2star_phot(
-                theta[:len(TWO_STAR_PARAM_NAMES)],  # strip BB params before model call
+                theta[:len(TWO_STAR_PARAM_NAMES)],  # physical params only
                 bands,
                 mist_predictor=mist_predictor,
                 phoenix_grid=phoenix_grid,
@@ -1108,7 +1121,7 @@ def fit_2star_dynesty(
             )
         except Exception:
             return _LOGLIKE_FLOOR
-        lnl2 = photometry_loglike(pred.mags, phot_rows)
+        lnl2 = photometry_loglike(pred.mags, phot_rows, sigma_int=sigma_int)
         return lnl2 if math.isfinite(lnl2) else _LOGLIKE_FLOOR
 
     pool: Any = None
@@ -1163,7 +1176,9 @@ def fit_2star_dynesty(
         float(res.logzerr[-1]) if getattr(res, "logzerr", None) is not None else float("nan")
     )
 
-    _param_names_2star = TWO_STAR_PARAM_NAMES + (BB_PARAM_NAMES if use_bb_2star else ())
+    _param_names_2star = (
+        TWO_STAR_PARAM_NAMES + ("sigma_int",) + (BB_PARAM_NAMES if use_bb_2star else ())
+    )
     return FitResult2Star(
         param_names=_param_names_2star,
         samples=eq,
@@ -1318,8 +1333,9 @@ def run_2star_fit(
     bb_t_k_best_2s: float | None = None
     bb_l_lsun_best_2s: float | None = None
     if with_bb_2star:
-        bb_t_k_best_2s = 10.0 ** float(result.best_theta[_n_phys_2star])
-        bb_l_lsun_best_2s = 10.0 ** float(result.best_theta[_n_phys_2star + 1])
+        # +1 to skip sigma_int, appended right after the physical params.
+        bb_t_k_best_2s = 10.0 ** float(result.best_theta[_n_phys_2star + 1])
+        bb_l_lsun_best_2s = 10.0 ** float(result.best_theta[_n_phys_2star + 2])
     bands = [r.band for r in rows if r.band not in _GAIA_CONSTRAINT_BANDS]
     bps = bandpasses
     if bps is None and synth_2star is None:
