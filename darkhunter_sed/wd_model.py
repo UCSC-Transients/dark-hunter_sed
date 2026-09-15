@@ -26,6 +26,7 @@ from numpy.typing import NDArray
 
 from darkhunter_sed.bergeron_wd import AtmType, BergeronGrid
 from darkhunter_sed.cummings_ifmr import CummingsIFMR, IFMRVariant, ms_lifetime_yr
+from darkhunter_sed.phot_sed_fit import bic_from_max_likelihood
 from darkhunter_sed.phot_sed_io import FLAG_DETECTION, PhotRow
 
 
@@ -328,6 +329,81 @@ def _wdstar_summary(
     return d
 
 
+def write_wd_pop_summary(
+    wd_results: list[dict[str, Any]],
+    *,
+    gaia_id: str,
+    out_dir: Path,
+    primary_atm: AtmType = "DA",
+    primary_ifmr: IFMRVariant = "MIST",
+) -> Path | None:
+    """
+    Write the pop-facing ``Gaia_DR3_<gaia_id>_wd_summary.json``.
+
+    Matches the ``schema_version``/``bic``/``n_free``/``n_data``/``logz`` contract
+    written by :func:`~darkhunter_sed.phot_sed_fit.write_1star_outputs` and
+    :func:`~darkhunter_sed.phot_sed_fit.write_2star_outputs`, so a consumer (e.g.
+    dark-hunter_pop's ``phot_sed_adapter``) can parse all three models identically.
+
+    Populated from the ``primary_atm``/``primary_ifmr`` variant in ``wd_results``
+    (default DA+MIST); the other three (atm, IFMR) variants are left as-is under
+    the existing ``wdstar_*``/``wd_*`` per-combination files and are not touched
+    by this function.
+
+    Parameters
+    ----------
+    wd_results :
+        Per-(atm_type, ifmr) result dicts, as returned by
+        :func:`run_wd_plus_star_fit`.
+    gaia_id :
+        Object id string (used in the filename).
+    out_dir :
+        Root directory to write into (the same root ``1star``/``2star``
+        summaries are written under, not the per-model ``wd`` subdirectory).
+    primary_atm, primary_ifmr :
+        Which (atm_type, ifmr) combination is canonical.
+
+    Returns
+    -------
+    Path | None
+        Path to the written summary, or ``None`` if no result matches
+        ``primary_atm``/``primary_ifmr``.
+    """
+    primary = next(
+        (
+            r for r in wd_results
+            if r["atm_type"] == primary_atm and r["ifmr"] == primary_ifmr
+        ),
+        None,
+    )
+    if primary is None:
+        return None
+
+    root = Path(out_dir).expanduser().resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    summary_path = root / f"Gaia_DR3_{gaia_id}_wd_summary.json"
+
+    summary: dict[str, Any] = {
+        "schema_version": 1,
+        "model": "wd",
+        "gaia_id": str(gaia_id),
+        "param_names": list(primary["param_names"]),
+        "logz": primary["logz"],
+        "logz_err": primary["logz_err"],
+        "bic": primary["bic"],
+        "ln_l_max": primary["ln_l_max"],
+        "best_theta": primary["best_theta"],
+        "n_data": primary["n_data"],
+        "n_free": primary["n_free"],
+        "nlive": primary["nlive"],
+        "n_samples": primary["n_samples"],
+        "atm_type": primary["atm_type"],
+        "ifmr": primary["ifmr"],
+    }
+    summary_path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+    return summary_path
+
+
 def run_wd_plus_star_fit(
     phot_rows: list[PhotRow],
     *,
@@ -344,6 +420,9 @@ def run_wd_plus_star_fit(
     seed: int = 42,
     dlogz: float = 0.5,
     outdir: Path | None = None,
+    pop_out_dir: Path | None = None,
+    primary_atm: AtmType = "DA",
+    primary_ifmr: IFMRVariant = "MIST",
 ) -> list[dict[str, Any]]:
     """
     Run nested-sampling WD+MS companion fits for all (atm_type × IFMR) pairs.
@@ -370,12 +449,20 @@ def run_wd_plus_star_fit(
         dynesty settings.
     outdir :
         When given, write per-combination NPZ and JSON summaries here.
+    pop_out_dir :
+        When given, also write the pop-facing ``Gaia_DR3_<gaia_id>_wd_summary.json``
+        here (see :func:`write_wd_pop_summary`) — this is the same root
+        ``1star``/``2star`` summaries are written under, not ``outdir``.
+    primary_atm, primary_ifmr :
+        Which (atm_type, ifmr) combination is canonical for the pop-facing
+        summary; passed through to :func:`write_wd_pop_summary`.
 
     Returns
     -------
     list[dict]
         One dict per (atm_type, ifmr) pair with keys:
-        ``atm_type, ifmr, logevidence, samples, weights,
+        ``atm_type, ifmr, logevidence, logz, logz_err, bic, ln_l_max, best_theta,
+        n_data, n_free, nlive, n_samples, samples, weights,
         m_wd_samples, m_i_samples, t_cool_yr_samples, param_names, gaia_id``.
     """
     import dynesty
@@ -417,6 +504,19 @@ def run_wd_plus_star_fit(
             samples  = dres.samples
             weights  = np.exp(dres.logwt - dres.logz[-1])
             lnz      = float(dres.logz[-1])
+            lnz_err  = (
+                float(dres.logzerr[-1]) if getattr(dres, "logzerr", None) is not None
+                else float("nan")
+            )
+
+            logl      = np.asarray(dres.logl, dtype=np.float64)
+            imax      = int(np.argmax(logl))
+            ln_l_max  = float(logl[imax])
+            best_theta = samples[imax].copy()
+            n_data    = len(det_rows)
+            bic       = bic_from_max_likelihood(
+                ln_l_max=ln_l_max, n_free=ndim, n_data=n_data
+            )
 
             # Derive M_WD, M_i, t_cool for each posterior sample.
             n_samp        = len(samples)
@@ -442,6 +542,17 @@ def run_wd_plus_star_fit(
                 "atm_type":        atm,
                 "ifmr":            variant,
                 "logevidence":     lnz,
+                "logz":            lnz,
+                "logz_err":        lnz_err,
+                "bic":             bic,
+                "ln_l_max":        ln_l_max,
+                "best_theta":      {
+                    n: float(v) for n, v in zip(WD_STAR_PARAM_NAMES, best_theta)
+                },
+                "n_data":          n_data,
+                "n_free":          ndim,
+                "nlive":           int(nlive),
+                "n_samples":       int(len(samples)),
                 "samples":         samples,
                 "weights":         weights,
                 "m_wd_samples":    m_wd_arr,
@@ -471,5 +582,14 @@ def run_wd_plus_star_fit(
                 (outdir / f"{stem}_summary.json").write_text(
                     json.dumps(summ, indent=2)
                 )
+
+    if pop_out_dir is not None:
+        write_wd_pop_summary(
+            results,
+            gaia_id=gaia_id,
+            out_dir=pop_out_dir,
+            primary_atm=primary_atm,
+            primary_ifmr=primary_ifmr,
+        )
 
     return results
