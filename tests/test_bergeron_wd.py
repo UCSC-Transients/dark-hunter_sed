@@ -22,6 +22,7 @@ import pytest
 
 from darkhunter_sed.bergeron_wd import BergeronGrid, _parse_global_table, _LOGG_GRID
 from darkhunter_sed.cummings_ifmr import CummingsIFMR, ms_lifetime_yr
+from darkhunter_sed.wd_model import WD_STAR_PARAM_NAMES, write_wd_pop_summary
 
 # ---------------------------------------------------------------------------
 # Fixture: minimal Bergeron Table_DA subset
@@ -327,4 +328,64 @@ class TestRealBergeronGrid:
     def test_da_extrap_flag_inside(self, da_grid: BergeronGrid) -> None:
         result = da_grid.synth_phot(10000.0, 8.0, a_v=0.0, distance_pc=100.0)
         assert result["extrap_mass"] is False
+
+
+# ---------------------------------------------------------------------------
+# write_wd_pop_summary
+# ---------------------------------------------------------------------------
+def _fake_wd_result(atm: str, ifmr: str, *, logz: float = -123.4) -> dict:
+    """Minimal stand-in for one entry of run_wd_plus_star_fit's return list."""
+    return {
+        "atm_type": atm,
+        "ifmr": ifmr,
+        "logevidence": logz,
+        "logz": logz,
+        "logz_err": 0.5,
+        "bic": 42.0,
+        "ln_l_max": -10.0,
+        "best_theta": {n: 1.0 for n in WD_STAR_PARAM_NAMES},
+        "n_data": 12,
+        "n_free": len(WD_STAR_PARAM_NAMES),
+        "nlive": 200,
+        "n_samples": 5000,
+        "param_names": WD_STAR_PARAM_NAMES,
+        "gaia_id": "12345",
+    }
+
+
+class TestWriteWdPopSummary:
+    def test_writes_primary_variant(self, tmp_path: Path) -> None:
+        results = [
+            _fake_wd_result("DA", "MIST", logz=-100.0),
+            _fake_wd_result("DA", "PARSEC", logz=-105.0),
+            _fake_wd_result("DB", "MIST", logz=-110.0),
+            _fake_wd_result("DB", "PARSEC", logz=-115.0),
+        ]
+        path = write_wd_pop_summary(results, gaia_id="12345", out_dir=tmp_path)
+        assert path == tmp_path / "Gaia_DR3_12345_wd_summary.json"
+        assert path.exists()
+
+        import json
+        summary = json.loads(path.read_text())
+        assert summary["schema_version"] == 1
+        assert summary["model"] == "wd"
+        assert summary["gaia_id"] == "12345"
+        assert summary["logz"] == pytest.approx(-100.0)
+        assert summary["atm_type"] == "DA"
+        assert summary["ifmr"] == "MIST"
+        for key in ("bic", "n_free", "n_data", "logz", "logz_err", "ln_l_max", "param_names", "best_theta"):
+            assert key in summary
+
+    def test_leaves_other_variants_untouched(self, tmp_path: Path) -> None:
+        # Simulate existing per-variant files that must not be modified.
+        (tmp_path / "wdstar_DA_PARSEC_summary.json").write_text("{}")
+        results = [_fake_wd_result("DA", "MIST")]
+        write_wd_pop_summary(results, gaia_id="1", out_dir=tmp_path)
+        assert (tmp_path / "wdstar_DA_PARSEC_summary.json").read_text() == "{}"
+
+    def test_no_matching_variant_returns_none(self, tmp_path: Path) -> None:
+        results = [_fake_wd_result("DB", "PARSEC")]
+        path = write_wd_pop_summary(results, gaia_id="1", out_dir=tmp_path)
+        assert path is None
+        assert not (tmp_path / "Gaia_DR3_1_wd_summary.json").exists()
 

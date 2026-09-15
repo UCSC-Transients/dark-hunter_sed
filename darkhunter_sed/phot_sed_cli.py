@@ -533,6 +533,7 @@ def main(argv: list[str] | None = None) -> int:
             seed=int(args.seed),
             dlogz=float(args.dlogz),
             outdir=wd_out,
+            pop_out_dir=out_dir,
         )
         for res in wd_results:
             print(
@@ -541,6 +542,7 @@ def main(argv: list[str] | None = None) -> int:
                 f"M_WD_med={float(np.nanmedian(res['m_wd_samples'])):.3f}"
             )
         print(f"wd+star outputs: {wd_out}")
+        print(f"pop summary: {Path(out_dir) / f'Gaia_DR3_{gaia_id}_wd_summary.json'}")
 
     else:
         print(f"Unsupported model: {args.model}", file=sys.stderr)
