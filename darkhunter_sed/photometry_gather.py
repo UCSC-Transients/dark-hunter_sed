@@ -187,30 +187,33 @@ def _append_ps1_from_gaia_archive(row, photometry):
     Prefer PS1 mean PSF AB mags from ``gaiadr2.panstarrs1_original_valid`` via
     ``gaiadr3.panstarrs1_best_neighbour`` (Gaia DR3 cross-match).
 
-    Quality check: require num_sigma_clipped >= 2 (at least 2 good epochs
-    contributed to the mean; 0 or 1 indicates an unreliable measurement).
+    Quality check: require the object-level ``n_detections >= 2`` (a mean from a
+    single detection is unreliable). The per-band ``*_num_sigma_clipped`` columns
+    used previously were removed from the Gaia archive in release 3.15.
+
+    Returns
+    -------
+    int
+        Number of PS1 bands appended to ``photometry``.
     """
+    n_det = _gaia_scalar(row, "n_detections")
+    if math.isfinite(n_det) and n_det < 2:
+        print(f"PS1 archive: skipped all bands (n_detections={int(n_det)} < 2).")
+        return 0
     bands = [
-        ("PS_g", "g_mean_psf_mag", "g_mean_psf_mag_error", "g_mean_psf_mag_num_sigma_clipped"),
-        ("PS_r", "r_mean_psf_mag", "r_mean_psf_mag_error", "r_mean_psf_mag_num_sigma_clipped"),
-        ("PS_i", "i_mean_psf_mag", "i_mean_psf_mag_error", "i_mean_psf_mag_num_sigma_clipped"),
-        ("PS_z", "z_mean_psf_mag", "z_mean_psf_mag_error", "z_mean_psf_mag_num_sigma_clipped"),
-        ("PS_y", "y_mean_psf_mag", "y_mean_psf_mag_error", "y_mean_psf_mag_num_sigma_clipped"),
+        ("PS_g", "g_mean_psf_mag", "g_mean_psf_mag_error"),
+        ("PS_r", "r_mean_psf_mag", "r_mean_psf_mag_error"),
+        ("PS_i", "i_mean_psf_mag", "i_mean_psf_mag_error"),
+        ("PS_z", "z_mean_psf_mag", "z_mean_psf_mag_error"),
+        ("PS_y", "y_mean_psf_mag", "y_mean_psf_mag_error"),
     ]
     n = 0
-    for out_name, c_mag, c_err, c_nclip in bands:
+    for out_name, c_mag, c_err in bands:
         m = _gaia_scalar(row, c_mag)
         err_cell = row[c_err] if c_err in row.colnames else None
         pair = _ps1_archive_mag_pair(m if math.isfinite(m) else None, err_cell)
         if pair is None:
             continue
-        # Require at least 2 sigma-clipped epochs; 0/1 indicates unreliable mean.
-        if c_nclip in row.colnames:
-            nclip = row[c_nclip]
-            if nclip is not None and not (hasattr(nclip, "mask") and nclip.mask):
-                if int(nclip) < 2:
-                    print(f"PS1 archive {out_name}: skipped (num_sigma_clipped={int(nclip)} < 2).")
-                    continue
         photometry.append((out_name, pair[0], pair[1]))
         n += 1
     return n
@@ -304,15 +307,11 @@ def query_catalogs(source_id, radius=3, ps1_vizier_epoch_jyear=PS1_VIZIER_DEFAUL
     job_ps = Gaia.launch_job(
         f"""
         SELECT TOP 10 ps.g_mean_psf_mag, ps.g_mean_psf_mag_error,
-               ps.g_mean_psf_mag_num_sigma_clipped,
                ps.r_mean_psf_mag, ps.r_mean_psf_mag_error,
-               ps.r_mean_psf_mag_num_sigma_clipped,
                ps.i_mean_psf_mag, ps.i_mean_psf_mag_error,
-               ps.i_mean_psf_mag_num_sigma_clipped,
                ps.z_mean_psf_mag, ps.z_mean_psf_mag_error,
-               ps.z_mean_psf_mag_num_sigma_clipped,
                ps.y_mean_psf_mag, ps.y_mean_psf_mag_error,
-               ps.y_mean_psf_mag_num_sigma_clipped
+               ps.n_detections
         FROM gaiadr3.panstarrs1_best_neighbour AS nb
         INNER JOIN gaiadr2.panstarrs1_original_valid AS ps
             ON nb.original_ext_source_id = ps.obj_id
