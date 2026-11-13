@@ -15,7 +15,7 @@ Batch spectrophotometric fitting with uberMS. **Run the RV pipeline first** so
 | `SPEC_ROOT` | `/Users/rfoley/darkhunter/rvs/data` |
 | `DARKHUNTER_OUTPUT_DIR` | `/Users/rfoley/darkhunter/rvs/output` |
 | `PYSYN_CDBS` | `/Users/rfoley/pysynphot/trds` (synphot CDBS; PS1/Swift → `comp/nonhst/`) |
-| `PHOENIX_DIR` | `/Users/rfoley/phoenix/HiResFITS` (PHOENIX ACES HiRes; Path-2) |
+| `PHOENIX_DIR` | `/Users/rfoley/phoenix/CompactFITS` (compact rebinned PHOENIX ACES, R=2000; HiResFITS layout also auto-detected; Path-2) |
 
 ```bash
 export SED_REPO=/Users/rfoley/darkhunter/seds/dark-hunter_sed
@@ -27,7 +27,7 @@ export DARKHUNTER_OUTPUT_DIR=/Users/rfoley/darkhunter/rvs/output
 export DARKHUNTER_SED_OUTPUT_DIR=$SED_REPO/output
 export DARKHUNTER_SED_PHOTOMETRY_DIR=$SED_REPO/output/photometry
 export PYSYN_CDBS=/Users/rfoley/pysynphot/trds
-export PHOENIX_DIR=/Users/rfoley/phoenix/HiResFITS
+export PHOENIX_DIR=/Users/rfoley/phoenix/CompactFITS
 export PYTHONPATH=$RV_REPO:$SED_REPO
 ```
 
@@ -44,13 +44,20 @@ $PY -m darkhunter_sed.filters_synphot
 
 `darkhunter_sed.phoenix_grid.PhoenixGrid` indexes `$PHOENIX_DIR` and interpolates Teff / logg / [Fe/H] / [α/Fe] when Alpha dirs exist. SED order: dilute → (sum components) → `extinction_f99` F99 R_V=3.1 → bandpass-native `synthesize_mags` (interp onto filter wavesets; do not feed full HiRes into synphot). Unit tests use a mocked tiny wavelength grid (no full HiRes tree in CI).
 
+`$PHOENIX_DIR` is normally the compact R=2000 grid (`WAVE_PHOENIX-ACES-AGSS-COND-2011-R2000.fits` + `…-R2000.fits` spectra); a HiResFITS tree is auto-detected too. Build/resume it from the GWDG HiRes mirror (one file at a time; temp HiRes files deleted after rebinning; `--src-local DIR` rebuilds from a local HiRes tree):
+
+```bash
+$PY $SED_REPO/scripts/build_phoenix_compact.py --dest /Users/rfoley/phoenix/CompactFITS --dry-run
+$PY $SED_REPO/scripts/build_phoenix_compact.py --dest /Users/rfoley/phoenix/CompactFITS --workers 4 --validate 3
+```
+
 ### Path-2 MISTy + 1-star dynesty
 
 `darkhunter_sed.misty_iso` wraps mistNN under `STELLAR_ROOT` / `DARKHUNTER_SED_MODELS_DIR`. `darkhunter-sed-phot --model 1star` runs dynesty on `EEP, M, [Fe/H], [α/Fe], Av, ϖ`, writing BIC + lnZ summaries under `output/phot_sed/` (`DARKHUNTER_SED_PHOT_SED_DIR`). Uniform priors only in this release (full Path-2 prior module later). Tests inject mock MISTy / synth photometry.
 
 ```bash
 export STELLAR_ROOT=/Users/rfoley/stellar
-export PHOENIX_DIR=/Users/rfoley/phoenix/HiResFITS
+export PHOENIX_DIR=/Users/rfoley/phoenix/CompactFITS
 export JAX_PLATFORMS=cpu   # recommended on macOS
 darkhunter-sed-phot <gaia_id> --model 1star
 ```

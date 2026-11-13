@@ -65,7 +65,7 @@ pip install -e ~/stellar/uberMS ~/stellar/ThePayne ~/stellar/MISTy
 | `DARKHUNTER_BLAZE_CALIBRATION` | Per-order sinc² blaze JSON (default: dark-hunter_rv `calibration/blaze_orders_apf.json`) |
 | `DARKHUNTER_SED_MASKS_DIR` | Picker regions JSON directory (default: `output/masks/`) |
 | `PYSYN_CDBS` | synphot/pysynphot CDBS root (typical: `/Users/rfoley/pysynphot/trds`); Path-2 PS1/Swift thruputs install to `$PYSYN_CDBS/grp/redcat/trds/comp/nonhst/` |
-| `PHOENIX_DIR` | PHOENIX ACES HiResFITS root (default: `/Users/rfoley/phoenix/HiResFITS`); Path-2 forward photometry |
+| `PHOENIX_DIR` | PHOENIX ACES grid root (default: `/Users/rfoley/phoenix/CompactFITS`, compact R=2000 grid from `scripts/build_phoenix_compact.py`; a full HiResFITS tree is also auto-detected); Path-2 forward photometry |
 | `DARKHUNTER_SED_PHOT_SED_DIR` | Path-2 dynesty outputs (default: `output/phot_sed/`) |
 
 ### Path-2 filter thruputs (PS1 / Swift)
@@ -82,10 +82,17 @@ Swift **catalog gather** is not implemented yet (filters/registry only).
 
 ### Path-2 PHOENIX + F99
 
-Forward photometry loads HiRes spectra from `$PHOENIX_DIR` (Teff, logg, [Fe/H], and [α/Fe] when Alpha-tagged directories exist), applies Fitzpatrick (1999) extinction at **R_V=3.1** via `dust_extinction.F99.extinguish` to the **full** (diluted) SED, **then** synthesizes AB mags on bandpass-native wavelength grids (`darkhunter_sed.phoenix_grid`, `darkhunter_sed.extinction_f99`). Multi-component models must **sum → F99 → synth** (not per-star magnitudes). HiRes arrays are not passed wholesale into synphot `Observation` (too slow).
+Forward photometry loads PHOENIX spectra from `$PHOENIX_DIR` (Teff, logg, [Fe/H], and [α/Fe] when Alpha-tagged directories exist), applies Fitzpatrick (1999) extinction at **R_V=3.1** via `dust_extinction.F99.extinguish` to the **full** (diluted) SED, **then** synthesizes AB mags on bandpass-native wavelength grids (`darkhunter_sed.phoenix_grid`, `darkhunter_sed.extinction_f99`). Multi-component models must **sum → F99 → synth** (not per-star magnitudes). HiRes arrays are not passed wholesale into synphot `Observation` (too slow).
+
+`$PHOENIX_DIR` may hold either the full HiRes tree (~6 MB/spectrum) or a **compact** grid
+(flux-conserving rebin to constant R=2000 log-λ over the full ~500–55000 Å range, ~45 KB/spectrum,
+rebinning error < 2e-4 mag in every registered band); `PhoenixGrid` auto-detects the layout. Build the
+compact grid by streaming the HiRes archive one file at a time (resumable; `--dry-run` shows counts
+and sizes; `--validate N` prints HiRes-vs-compact Δmag per band):
 
 ```bash
-export PHOENIX_DIR=/Users/rfoley/phoenix/HiResFITS
+python3 scripts/build_phoenix_compact.py --dest /Users/rfoley/phoenix/CompactFITS --workers 4
+export PHOENIX_DIR=/Users/rfoley/phoenix/CompactFITS
 ```
 
 ### Path-2 MISTy + 1-star photometry SED
@@ -94,7 +101,7 @@ export PHOENIX_DIR=/Users/rfoley/phoenix/HiResFITS
 
 ```bash
 export STELLAR_ROOT=~/stellar
-export PHOENIX_DIR=/Users/rfoley/phoenix/HiResFITS
+export PHOENIX_DIR=/Users/rfoley/phoenix/CompactFITS
 # optional: JAX_PLATFORMS=cpu
 darkhunter-sed-phot <gaia_id> --model 1star
 # or: python -m darkhunter_sed.phot_sed_cli <gaia_id> --model 1star

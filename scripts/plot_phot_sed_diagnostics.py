@@ -578,7 +578,7 @@ def main(argv: list[str] | None = None) -> int:
                     help="MistNN HDF5 path (required for 2-star SEDs; "
                          "falls back to STELLAR_ROOT resolution)")
     ap.add_argument("--phoenix-dir", type=Path, default=None,
-                    help="PHOENIX HiResFITS root (required for 2-star SEDs)")
+                    help="PHOENIX grid root, compact or HiRes (required for 2-star SEDs)")
     ap.add_argument("--outdir", type=Path, default=None,
                     help="Where to write PDFs (default: same dir as the samples)")
     args = ap.parse_args(argv)
