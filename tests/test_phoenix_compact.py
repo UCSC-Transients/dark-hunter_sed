@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+import threading
 from pathlib import Path
 from types import ModuleType
 
@@ -355,3 +356,44 @@ def test_cli_local_build_is_resumable(hires_tree: Path, tmp_path: Path,
 
     with pytest.raises(SystemExit):
         script.main(["--src-local", str(hires_tree), "--dest", str(dest), "--resolution", "999"])
+
+
+def test_cli_builds_in_sequential_batches(hires_tree: Path, tmp_path: Path,
+                                          capsys: pytest.CaptureFixture[str],
+                                          monkeypatch: pytest.MonkeyPatch) -> None:
+    script = _load_script(monkeypatch)
+    dest = tmp_path / "out"
+    lock = threading.Lock()
+    in_flight = 0
+    peak = 0
+    finished = 0
+    finished_at_start: list[int] = []
+    real_build_one = script._build_one
+
+    def tracking_build_one(*a: object, **k: object) -> int:
+        nonlocal in_flight, peak, finished
+        with lock:
+            finished_at_start.append(finished)
+            in_flight += 1
+            peak = max(peak, in_flight)
+        try:
+            return real_build_one(*a, **k)
+        finally:
+            with lock:
+                in_flight -= 1
+                finished += 1
+
+    monkeypatch.setattr(script, "_build_one", tracking_build_one)
+    argv = ["--src-local", str(hires_tree), "--dest", str(dest), "--resolution", str(R_TEST),
+            "--workers", "2", "--batch-size", "2"]
+    assert script.main(argv) == 0
+    out = capsys.readouterr().out
+    assert "batch 1/2 done" in out and "batch 2/2 done" in out
+    assert "built: 4" in out
+    assert peak <= 2
+    # Batch 2 starts only after both batch-1 models are finished.
+    assert all(n >= 2 for n in finished_at_start[2:])
+    assert len(PhoenixGrid(root=dest).points) == 4
+
+    with pytest.raises(SystemExit):
+        script.main(argv[:-1] + ["0"])
