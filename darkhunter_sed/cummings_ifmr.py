@@ -4,7 +4,8 @@ Cummings+2018 initial–final mass relation (IFMR) for white dwarfs.
 Reference
 ---------
 Cummings et al. 2018, ApJ 866, 21
-    "The Keck Spectroscopic Survey of MK Standards and Other Nearby Stars"
+    "The White Dwarf Initial-Final Mass Relation for Progenitor Stars from
+    0.85 to 7.5 M_sun"
     Table 1, piecewise linear IFMRs for PARSEC (eqs 1–3) and MIST (eqs 4–6)
     stellar evolution models.
 

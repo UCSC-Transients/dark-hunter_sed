@@ -151,6 +151,17 @@ def _make_wdstar_loglike(
 
     bound_list = list(bounds.as_list())
     bound_list[_WDS_PLX_IDX] = (plx_lo, plx_hi)
+    # BergeronGrid interpolators extrapolate linearly outside the table
+    # (Table_DB starts at 3250 K vs the 1500 K default), so keep Teff on-grid.
+    teff_lo, teff_hi = bound_list[_WDS_TEFF_IDX]
+    teff_lo = max(float(teff_lo), grid.teff_min)
+    teff_hi = min(float(teff_hi), grid.teff_max)
+    if teff_lo >= teff_hi:
+        raise ValueError(
+            f"WD Teff prior {bounds.teff_wd} does not overlap the {grid.atm_type} "
+            f"grid range [{grid.teff_min}, {grid.teff_max}] K"
+        )
+    bound_list[_WDS_TEFF_IDX] = (teff_lo, teff_hi)
     sig_hi = float(bound_list[_WDS_SIG_IDX][1])
 
     def log_likelihood(params: NDArray[np.float64]) -> float:
@@ -527,14 +538,10 @@ def run_wd_plus_star_fit(
             for j in range(n_samp):
                 teff_wd = float(samples[j, _WDS_TEFF_IDX])
                 logg_wd = float(samples[j, _WDS_LOGG_IDX])
-                av_j    = float(samples[j, _WDS_AV_IDX])
-                plx_j   = float(samples[j, _WDS_PLX_IDX])
-                dist_j  = 1000.0 / max(plx_j, 1e-6)
                 try:
-                    sr = grid.synth_phot(teff_wd, logg_wd, av_j, dist_j, bands=None)
-                    m_wd_arr[j]      = sr["m_wd"]
+                    m_wd_arr[j]      = grid.m_wd(teff_wd, logg_wd)
                     m_i_arr[j]       = ifmr_obj.initial_mass(m_wd_arr[j])
-                    t_cool_yr_arr[j] = sr["cooling_age_yr"]
+                    t_cool_yr_arr[j] = grid.cooling_age_yr(teff_wd, logg_wd)
                 except Exception:
                     pass
 
