@@ -152,7 +152,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--phoenix-dir",
         type=Path,
         default=None,
-        help="Override PHOENIX_DIR HiResFITS root",
+        help="Override PHOENIX_DIR (compact R-grid or HiResFITS root; auto-detected)",
     )
     p.add_argument(
         "--plot",

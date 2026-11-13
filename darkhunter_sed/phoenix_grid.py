@@ -1,16 +1,27 @@
 """
-PHOENIX ACES HiRes spectrum grid loader / interpolator (Path 2).
+PHOENIX ACES spectrum grid loader / interpolator (Path 2).
 
-Layout expected under ``PHOENIX_DIR`` (default ``/Users/rfoley/phoenix/HiResFITS``)::
+Two on-disk layouts under ``PHOENIX_DIR`` (default
+``/Users/rfoley/phoenix/CompactFITS``) are auto-detected by
+:func:`detect_phoenix_layout`:
+
+**Compact** (rebinned, built by ``scripts/build_phoenix_compact.py``)::
+
+    WAVE_PHOENIX-ACES-AGSS-COND-2011-R{R}.fits    # bin centers (+ EDGES HDU)
+    PHOENIX-ACES-AGSS-COND-2011/Z{±M/H}[.Alpha={±α}]/
+        lte{Teff:05d}-{logg:.2f}{±M/H}[.Alpha={±α}].PHOENIX-ACES-AGSS-COND-2011-R{R}.fits
+
+**HiRes** (original archive)::
 
     WAVE_PHOENIX-ACES-AGSS-COND-2011.fits
-    PHOENIX-ACES-AGSS-COND-2011/
-        Z{±M/H}/
-        Z{±M/H}.Alpha={±α}/
-            lte{Teff:05d}-{logg:.2f}{±M/H}[.Alpha={±α}].PHOENIX-...-HiRes.fits
+    PHOENIX-ACES-AGSS-COND-2011/Z{±M/H}[.Alpha={±α}]/
+        lte{Teff:05d}-{logg:.2f}{±M/H}[.Alpha={±α}].PHOENIX-ACES-AGSS-COND-2011-HiRes.fits
 
-Flux files store surface flux density in ``erg/s/cm^2/cm`` (per cm of
-wavelength). This module converts to FLAM (``erg/s/cm^2/Å``) for synphot.
+The logg token may carry ``+`` instead of ``-`` (e.g. ``lte04000+0.00-0.0...``).
+Flux files in both layouts store surface flux density in ``erg/s/cm^2/cm``
+(per cm of wavelength); compact fluxes are flux-conserving bin averages of
+HiRes (see :mod:`darkhunter_sed.phoenix_compact`). This module converts to
+FLAM (``erg/s/cm^2/Å``) for synphot.
 
 Path-2 SED order (absolute)
 ---------------------------
@@ -21,7 +32,7 @@ combine → redden → synth sequence (never stack per-component magnitudes).
 
 Photometry fits call :meth:`PhoenixGrid.set_photometry_wavelengths` with the
 union of bandpass wavesets so dynesty likelihoods blend/redden on that short
-grid rather than full HiRes (~1.57M λ).
+grid rather than the native grid (~1.57M λ HiRes, ~9.4k λ compact R=2000).
 """
 
 from __future__ import annotations
@@ -31,6 +42,7 @@ from collections import OrderedDict
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal, NamedTuple
 
 import numpy as np
 from astropy.io import fits
@@ -48,6 +60,10 @@ FluxLoader = Callable[[Path], NDArray[np.floating]]
 # Shared wavelength product shipped with the HiRes tree.
 _WAVE_NAME = "WAVE_PHOENIX-ACES-AGSS-COND-2011.fits"
 _GRID_SUBDIR = "PHOENIX-ACES-AGSS-COND-2011"
+_COMPACT_WAVE_RE = re.compile(r"^WAVE_PHOENIX-ACES-AGSS-COND-2011-R(?P<res>\d+)\.fits$")
+# Extension name holding bin edges (Å) in the compact wavelength file.
+COMPACT_EDGES_EXTNAME = "EDGES"
+HIRES_FLUX_SUFFIX = "-HiRes.fits"
 
 # Max cached resampled-photometry flux arrays in :meth:`PhoenixGrid._load_for_sed`.
 # 4096 entries × ~25 KB each ≈ 100 MB — large enough that a 200-live-point dynesty
@@ -64,11 +80,12 @@ _DEFAULT_HIRES_CACHE_SIZE = 32
 _DIR_RE = re.compile(
     r"^Z(?P<mh>[+-]?\d+\.\d+)(?:\.Alpha=(?P<alpha>[+-]?\d+\.\d+))?$"
 )
-# File: lte05000-4.50-0.0.PHOENIX-... or lte05000-4.50-0.0.Alpha=+0.20.PHOENIX-...
+# File: lte05000-4.50-0.0.PHOENIX-...-HiRes.fits, lte04000+0.00-0.0.Alpha=+1.00...,
+# or the compact ...-R2000.fits. The logg sign is a separator, not a sign of logg.
 _FILE_RE = re.compile(
-    r"^lte(?P<teff>\d{5})-(?P<logg>\d+\.\d+)(?P<mh>[+-]\d+\.\d+)"
+    r"^lte(?P<teff>\d{5})[+-](?P<logg>\d+\.\d+)(?P<mh>[+-]\d+\.\d+)"
     r"(?:\.Alpha=(?P<alpha>[+-]?\d+\.\d+))?"
-    r"\.PHOENIX-ACES-AGSS-COND-2011-HiRes\.fits$"
+    r"\.PHOENIX-ACES-AGSS-COND-2011-(?:HiRes|R(?P<res>\d+))\.fits$"
 )
 
 # erg/s/cm^2/cm → erg/s/cm^2/Å  (1 cm = 1e8 Å)
@@ -123,12 +140,212 @@ def _fmt_mh_file(mh: float) -> str:
     return f"{mh:+.1f}"
 
 
+def parse_subgrid_name(name: str) -> tuple[float, float] | None:
+    """
+    Parse a ``Z{±M/H}[.Alpha={±α}]`` subgrid directory name.
+
+    Parameters
+    ----------
+    name :
+        Directory name without trailing slash (URL-decoded), e.g.
+        ``Z-0.0`` or ``Z-0.5.Alpha=+0.40``.
+
+    Returns
+    -------
+    tuple[float, float] | None
+        ``([M/H], [α/Fe])`` or ``None`` if not a subgrid name.
+    """
+    dm = _DIR_RE.match(name)
+    if dm is None:
+        return None
+    return float(dm.group("mh")), float(dm.group("alpha") or 0.0)
+
+
+class PhoenixFileTags(NamedTuple):
+    """
+    Atmosphere labels parsed from a PHOENIX ``lte…`` spectrum filename.
+
+    Attributes
+    ----------
+    teff_k, logg, mh, alpha :
+        Grid labels (``alpha`` is ``0.0`` when the filename has no Alpha tag).
+        ``logg`` is always non-negative (the ``±`` before it is a separator).
+    resolution :
+        ``None`` for HiRes files, else the compact resolving power ``R``.
+    """
+
+    teff_k: float
+    logg: float
+    mh: float
+    alpha: float
+    resolution: int | None
+
+
+def parse_phoenix_filename(name: str) -> PhoenixFileTags | None:
+    """
+    Parse a HiRes or compact PHOENIX spectrum filename.
+
+    Parameters
+    ----------
+    name :
+        Bare filename (no directory), already URL-decoded, e.g.
+        ``lte04000+0.00-0.0.Alpha=+1.00.PHOENIX-ACES-AGSS-COND-2011-HiRes.fits``
+        or ``lte05000-4.50-0.0.PHOENIX-ACES-AGSS-COND-2011-R2000.fits``.
+
+    Returns
+    -------
+    PhoenixFileTags | None
+        Parsed labels, or ``None`` if ``name`` is not a PHOENIX spectrum file.
+    """
+    fm = _FILE_RE.match(name)
+    if fm is None:
+        return None
+    res = fm.group("res")
+    return PhoenixFileTags(
+        teff_k=float(fm.group("teff")),
+        logg=float(fm.group("logg")),
+        mh=float(fm.group("mh")),
+        alpha=float(fm.group("alpha") or 0.0),
+        resolution=int(res) if res is not None else None,
+    )
+
+
+def compact_wave_name(resolution: int) -> str:
+    """Filename of the shared compact wavelength file for resolving power ``R``."""
+    return f"WAVE_PHOENIX-ACES-AGSS-COND-2011-R{int(resolution)}.fits"
+
+
+def compact_flux_suffix(resolution: int) -> str:
+    """Filename suffix replacing ``-HiRes.fits`` in compact spectrum files."""
+    return f"-R{int(resolution)}.fits"
+
+
+def compact_flux_name(hires_name: str, resolution: int) -> str:
+    """
+    Map a HiRes spectrum filename to its compact counterpart.
+
+    Parameters
+    ----------
+    hires_name :
+        Bare HiRes filename ending in ``-HiRes.fits``.
+    resolution :
+        Compact resolving power ``R``.
+
+    Returns
+    -------
+    str
+        Same stem (including the original ``±`` logg token) with
+        ``-R{R}.fits`` instead of ``-HiRes.fits``.
+    """
+    if not hires_name.endswith(HIRES_FLUX_SUFFIX):
+        raise ValueError(f"Not a HiRes PHOENIX filename: {hires_name}")
+    return hires_name[: -len(HIRES_FLUX_SUFFIX)] + compact_flux_suffix(resolution)
+
+
+@dataclass(frozen=True, slots=True)
+class PhoenixLayout:
+    """
+    Detected on-disk PHOENIX layout under a grid root.
+
+    Parameters
+    ----------
+    kind :
+        ``"compact"`` (rebinned ``-R{R}.fits``) or ``"hires"`` (``-HiRes.fits``).
+    root :
+        Grid root (``PHOENIX_DIR``).
+    wave_path :
+        Shared wavelength FITS (compact: bin centers + ``EDGES`` HDU).
+    resolution :
+        Compact resolving power ``R``; ``None`` for HiRes.
+    """
+
+    kind: Literal["compact", "hires"]
+    root: Path
+    wave_path: Path
+    resolution: int | None
+
+    def accepts(self, tags: PhoenixFileTags) -> bool:
+        """True if a parsed spectrum filename belongs to this layout."""
+        return tags.resolution == self.resolution
+
+
+def detect_phoenix_layout(root: Path | str | None = None) -> PhoenixLayout:
+    """
+    Auto-detect compact vs HiRes PHOENIX layout from the wavelength file(s).
+
+    Parameters
+    ----------
+    root :
+        Grid root, or ``None`` → :func:`~darkhunter_sed.config.phoenix_dir`.
+
+    Returns
+    -------
+    PhoenixLayout
+        Compact when exactly one ``WAVE_…-R{R}.fits`` exists (preferred even if
+        the HiRes WAVE file is also present), else HiRes when
+        ``WAVE_PHOENIX-ACES-AGSS-COND-2011.fits`` exists.
+
+    Limits
+    ------
+    Several compact resolutions in one root are ambiguous and raise
+    ``ValueError``; keep one ``R`` per root. Raises ``FileNotFoundError`` when
+    neither wavelength file exists.
+    """
+    root_p = phoenix_dir(root)
+    compact: list[tuple[int, Path]] = []
+    if root_p.is_dir():
+        for p in sorted(root_p.glob("WAVE_PHOENIX-ACES-AGSS-COND-2011-R*.fits")):
+            m = _COMPACT_WAVE_RE.match(p.name)
+            if m is not None and p.is_file():
+                compact.append((int(m.group("res")), p))
+    if len(compact) > 1:
+        raise ValueError(
+            f"Multiple compact PHOENIX resolutions under {root_p}: "
+            f"{[p.name for _, p in compact]}; keep one R per PHOENIX_DIR"
+        )
+    if compact:
+        res, path = compact[0]
+        return PhoenixLayout("compact", root_p, path, res)
+    hires = root_p / _WAVE_NAME
+    if hires.is_file():
+        return PhoenixLayout("hires", root_p, hires, None)
+    raise FileNotFoundError(
+        f"PHOENIX wavelength file missing under {root_p}: expected "
+        "WAVE_PHOENIX-ACES-AGSS-COND-2011-R{R}.fits (compact; build with "
+        f"scripts/build_phoenix_compact.py) or {_WAVE_NAME} (HiRes)"
+    )
+
+
+def load_compact_edges(wave_path: Path | str) -> NDArray[np.float64]:
+    """
+    Read compact-grid bin edges (Å) from the ``EDGES`` HDU of a compact WAVE file.
+
+    Parameters
+    ----------
+    wave_path :
+        Compact wavelength FITS (``WAVE_…-R{R}.fits``).
+
+    Returns
+    -------
+    NDArray[np.float64]
+        Strictly increasing edges, length ``n_bins + 1``.
+    """
+    edges = np.asarray(
+        fits.getdata(wave_path, extname=COMPACT_EDGES_EXTNAME), dtype=np.float64
+    ).reshape(-1)
+    if edges.size < 2 or not np.all(np.diff(edges) > 0.0):
+        raise ValueError(f"Invalid {COMPACT_EDGES_EXTNAME} HDU in {wave_path}")
+    return edges
+
+
 def phoenix_model_path(
     root: Path | str,
     teff_k: float,
     logg: float,
     mh: float,
     alpha: float = 0.0,
+    *,
+    resolution: int | None = None,
 ) -> Path:
     """
     Build the canonical on-disk path for a grid point (may not exist).
@@ -136,22 +353,30 @@ def phoenix_model_path(
     Parameters
     ----------
     root :
-        HiResFITS root (``PHOENIX_DIR``).
+        Grid root (``PHOENIX_DIR``).
     teff_k, logg, mh, alpha :
         Atmospheric parameters (Teff rounded to nearest integer Kelvin for the
         filename).
+    resolution :
+        ``None`` → HiRes filename; else compact ``-R{resolution}.fits`` name.
 
     Returns
     -------
     Path
         Expected spectrum FITS path under ``PHOENIX-ACES-AGSS-COND-2011/``.
+
+    Limits
+    ------
+    Always uses ``-`` before logg; some archive files use ``+0.00`` at
+    logg=0, so prefer the scanned :attr:`PhoenixPoint.path` for I/O.
     """
     root = Path(root)
     teff_i = int(round(float(teff_k)))
     dirname = _fmt_mh_dir(float(mh)) + _fmt_alpha_tag(float(alpha))
+    suffix = HIRES_FLUX_SUFFIX if resolution is None else compact_flux_suffix(resolution)
     fname = (
         f"lte{teff_i:05d}-{float(logg):.2f}{_fmt_mh_file(float(mh))}"
-        f"{_fmt_alpha_tag(float(alpha))}.PHOENIX-ACES-AGSS-COND-2011-HiRes.fits"
+        f"{_fmt_alpha_tag(float(alpha))}.PHOENIX-ACES-AGSS-COND-2011{suffix}"
     )
     return root / _GRID_SUBDIR / dirname / fname
 
@@ -160,25 +385,24 @@ def load_phoenix_wavelength(
     root: Path | str | None = None,
 ) -> NDArray[np.float64]:
     """
-    Load the shared PHOENIX HiRes wavelength array (Å).
+    Load the shared PHOENIX wavelength array (Å) for the detected layout.
 
     Parameters
     ----------
     root :
-        HiResFITS root, or ``None`` → :func:`~darkhunter_sed.config.phoenix_dir`.
+        Grid root, or ``None`` → :func:`~darkhunter_sed.config.phoenix_dir`.
 
     Returns
     -------
     NDArray[np.float64]
-        1-D wavelengths in Angstroms.
+        1-D vacuum wavelengths in Angstroms (compact: bin centers).
 
     Limits
     ------
-    Expects ``WAVE_PHOENIX-ACES-AGSS-COND-2011.fits`` primary HDU. Full file is
-    ~1.5e6 samples; tests should inject a tiny array instead of calling this.
+    Reads the primary HDU of the file chosen by :func:`detect_phoenix_layout`.
+    The HiRes file is ~1.5e6 samples; tests should inject a tiny array instead.
     """
-    root_p = phoenix_dir(root)
-    path = root_p / _WAVE_NAME
+    path = detect_phoenix_layout(root).wave_path
     if not path.is_file():
         raise FileNotFoundError(f"PHOENIX wavelength file missing: {path}")
     data = fits.getdata(path, memmap=True)
@@ -195,12 +419,12 @@ def load_phoenix_flux(
     stride: int = 1,
 ) -> NDArray[np.float64]:
     """
-    Load a single PHOENIX HiRes flux array.
+    Load a single PHOENIX flux array (HiRes or compact; same units).
 
     Parameters
     ----------
     path :
-        Spectrum FITS path.
+        Spectrum FITS path (compact files store float32 bin averages).
     to_flam :
         If True (default), convert ``erg/s/cm^2/cm`` → ``erg/s/cm^2/Å`` by
         dividing by ``1e8``. If False, return native surface flux.
@@ -345,12 +569,14 @@ def _multilinear(
 
 class PhoenixGrid:
     """
-    Indexed PHOENIX HiRes library with multi-linear parameter interpolation.
+    Indexed PHOENIX library (compact or HiRes) with multi-linear parameter interpolation.
 
     Parameters
     ----------
     root :
-        HiResFITS root, or ``None`` → :func:`~darkhunter_sed.config.phoenix_dir`.
+        Grid root, or ``None`` → :func:`~darkhunter_sed.config.phoenix_dir`.
+        Compact vs HiRes layout is auto-detected (:func:`detect_phoenix_layout`)
+        and only spectrum files of that layout are indexed.
     wavelength :
         Optional injected wavelength array (Å). When set, the shared WAVE FITS
         is **not** read (use in CI with a tiny mock grid).
@@ -372,9 +598,27 @@ class PhoenixGrid:
         hundreds to thousands of Å wide, so even large strides lose no
         fidelity for photometric synthesis; this only shrinks the array that
         every cache miss must load from disk and interpolate against.
+        Ignored (forced to ``1``) for a compact grid, whose bins are already
+        flux averages at constant R.
+
+    Attributes
+    ----------
+    layout :
+        Detected :class:`PhoenixLayout`, or ``None`` when fully injected (CI) or
+        when ``wavelength`` is injected and no WAVE file exists (HiRes names
+        are then indexed, as before compact support).
+    coverage :
+        ``(λ_min, λ_max)`` in Å over which the native spectra are defined
+        (compact: outer bin edges; otherwise first/last wavelength sample).
 
     Limits
     ------
+    - Photometry-grid samples outside :attr:`coverage` get **zero** flux (no
+      extrapolation), matching :func:`synthesize_mags`. Bandpass wavesets that
+      reach past the red end (WISE W1/W2 beyond ~5.5 μm) therefore integrate
+      missing flux there, as documented in ``filters_synphot``.
+    - Compact spectra are bin averages at constant R; linear interpolation onto
+      finer bandpass wavesets is intended (broadband synthesis only).
     - Alpha enhancement is used **only** when Alpha-tagged directories exist in the
       index; requesting α≠0 with no Alpha coverage raises.
     - Interpolation requires a complete hypercube of corner models in the active
@@ -412,10 +656,31 @@ class PhoenixGrid:
         self._phot_wave: NDArray[np.float64] | None = None
         self._phot_flux_cache: OrderedDict[Path, NDArray[np.float64]] = OrderedDict()
         self._phot_alav: dict[float, NDArray[np.float64]] = {}
+        self._phot_outside: NDArray[np.bool_] | None = None
+        self.layout: PhoenixLayout | None = None
+        if wavelength is None:
+            self.layout = detect_phoenix_layout(self.root)
+        elif points is None:
+            try:
+                self.layout = detect_phoenix_layout(self.root)
+            except FileNotFoundError:
+                self.layout = None
         if wavelength is not None:
             self.wavelength = np.asarray(wavelength, dtype=np.float64).reshape(-1)
         else:
             self.wavelength = load_phoenix_wavelength(self.root)
+        if wavelength is None and self.layout is not None and self.layout.kind == "compact":
+            edges = load_compact_edges(self.layout.wave_path)
+            if edges.size != self.wavelength.size + 1:
+                raise ValueError(
+                    f"{self.layout.wave_path}: {edges.size} edges for "
+                    f"{self.wavelength.size} bin centers"
+                )
+            self.coverage: tuple[float, float] = (float(edges[0]), float(edges[-1]))
+            # Compact bins are flux averages; subsampling would drop flux.
+            self._hires_stride = 1
+        else:
+            self.coverage = (float(self.wavelength[0]), float(self.wavelength[-1]))
         if self._hires_stride > 1:
             self.wavelength = self.wavelength[:: self._hires_stride]
         if points is not None:
@@ -423,8 +688,9 @@ class PhoenixGrid:
         else:
             self._points = self._scan_disk()
         if not self._points:
+            kind = self.layout.kind if self.layout is not None else "hires"
             raise FileNotFoundError(
-                f"No PHOENIX HiRes models under {self.root / _GRID_SUBDIR}"
+                f"No PHOENIX {kind} models under {self.root / _GRID_SUBDIR}"
             )
         self._index: dict[tuple[float, float, float, float], PhoenixPoint] = {}
         for p in self._points:
@@ -457,13 +723,15 @@ class PhoenixGrid:
             dir_mh = float(dm.group("mh"))
             dir_alpha = float(dm.group("alpha") or 0.0)
             for f in d.glob("lte*.fits"):
-                fm = _FILE_RE.match(f.name)
-                if fm is None:
+                tags = parse_phoenix_filename(f.name)
+                if tags is None:
                     continue
-                teff = float(fm.group("teff"))
-                logg = float(fm.group("logg"))
-                mh = float(fm.group("mh"))
-                alpha = float(fm.group("alpha") or 0.0)
+                if self.layout is not None:
+                    if not self.layout.accepts(tags):
+                        continue
+                elif tags.resolution is not None:
+                    continue
+                teff, logg, mh, alpha = tags.teff_k, tags.logg, tags.mh, tags.alpha
                 # Prefer filename tags; fall back to directory if inconsistent.
                 if abs(mh - dir_mh) > 1e-6:
                     mh = dir_mh
@@ -558,6 +826,7 @@ class PhoenixGrid:
         """
         if wave_aa is None:
             self._phot_wave = None
+            self._phot_outside = None
             self._phot_flux_cache.clear()
             self._phot_alav.clear()
             return None
@@ -573,12 +842,19 @@ class PhoenixGrid:
         ):
             return self._phot_wave
         self._phot_wave = wave.copy()
+        lo, hi = self.coverage
+        self._phot_outside = (wave < lo) | (wave > hi)
         self._phot_flux_cache.clear()
         self._phot_alav.clear()
         return self._phot_wave
 
     def _load_for_sed(self, point: PhoenixPoint) -> NDArray[np.float64]:
-        """HiRes load, or resampled onto :attr:`_phot_wave` when set."""
+        """
+        Native-grid load, or resampled onto :attr:`_phot_wave` when set.
+
+        Linear interpolation of the native (HiRes samples or compact bin
+        averages) flux; photometry samples outside :attr:`coverage` are zero.
+        """
         if self._phot_wave is None:
             return self._load(point)
         key = point.path
@@ -586,8 +862,10 @@ class PhoenixGrid:
         if cached is not None:
             self._phot_flux_cache.move_to_end(key)
             return cached
-        hi = self._load(point)
-        flux = np.interp(self._phot_wave, self.wavelength, hi)
+        native = self._load(point)
+        flux = np.interp(self._phot_wave, self.wavelength, native)
+        if self._phot_outside is not None and self._phot_outside.any():
+            flux[self._phot_outside] = 0.0
         if self._flux_cache_size > 0:
             self._phot_flux_cache[key] = flux
             self._phot_flux_cache.move_to_end(key)

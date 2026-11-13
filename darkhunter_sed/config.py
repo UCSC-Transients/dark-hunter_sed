@@ -12,13 +12,15 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 SPECTRUM_ORDER_END_DEV_TOL = 0.04
 SPECTRUM_ORDER_END_MIN_PIXELS = 18
 
-# Path-2 PHOENIX ACES HiRes root (override with env ``PHOENIX_DIR``).
-DEFAULT_PHOENIX_DIR = Path("/Users/rfoley/phoenix/HiResFITS")
+# Path-2 PHOENIX ACES root (override with env ``PHOENIX_DIR``). Default is the
+# compact rebinned grid written by ``scripts/build_phoenix_compact.py``; a full
+# HiResFITS tree at ``PHOENIX_DIR`` is still auto-detected by ``PhoenixGrid``.
+DEFAULT_PHOENIX_DIR = Path("/Users/rfoley/phoenix/CompactFITS")
 
 
 def phoenix_dir(explicit: Path | str | None = None) -> Path:
     """
-    Resolve the PHOENIX HiResFITS root directory.
+    Resolve the PHOENIX ACES grid root directory (compact or HiRes layout).
 
     Parameters
     ----------
@@ -29,13 +31,16 @@ def phoenix_dir(explicit: Path | str | None = None) -> Path:
     Returns
     -------
     Path
-        Absolute HiResFITS root (contains ``WAVE_PHOENIX-*.fits`` and the
-        ``PHOENIX-ACES-AGSS-COND-2011/`` grid tree).
+        Absolute grid root. Contains either the compact wavelength file
+        ``WAVE_PHOENIX-ACES-AGSS-COND-2011-R{R}.fits`` (rebinned grid) or the
+        HiRes ``WAVE_PHOENIX-ACES-AGSS-COND-2011.fits``, plus the
+        ``PHOENIX-ACES-AGSS-COND-2011/`` grid tree.
 
     Limits
     ------
     Does not verify that the wavelength file or metallicity subdirs exist;
-    callers that need a populated grid should construct :class:`~darkhunter_sed.phoenix_grid.PhoenixGrid`.
+    callers that need a populated grid should construct :class:`~darkhunter_sed.phoenix_grid.PhoenixGrid`
+    (layout detection: :func:`~darkhunter_sed.phoenix_grid.detect_phoenix_layout`).
     """
     if explicit is not None:
         return Path(explicit).expanduser().resolve()
