@@ -2,9 +2,12 @@
 """
 Build a compact, rebinned PHOENIX ACES grid from the HiRes archive (Path 2).
 
-Streams the HiRes grid one file at a time — download to a temp file → rebin
-(flux-conserving, constant-R log-λ) → write compact file → delete temp — so the
-~6 MB HiRes spectra never accumulate on disk. Output layout and file format:
+Works through the selected models in batches of ``--batch-size``. Within a batch,
+``--workers`` files are in flight at once, each going download to a temp file →
+rebin (flux-conserving, constant-R log-λ) → write compact file → delete temp.
+The next batch starts only after the current one is finished and its temp files
+are gone, so at most ``--workers`` ~6 MB HiRes spectra exist on disk at any time
+and progress is reported per batch. Output layout and file format:
 :mod:`darkhunter_sed.phoenix_compact`; read back by
 :class:`darkhunter_sed.phoenix_grid.PhoenixGrid` (auto-detected).
 
@@ -40,7 +43,7 @@ import sys
 import tempfile
 import time
 from collections.abc import Callable, Sequence
-from concurrent.futures import FIRST_EXCEPTION, Future, ThreadPoolExecutor, wait
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from http.client import HTTPException, HTTPResponse
 from pathlib import Path
@@ -204,6 +207,9 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     p.add_argument("--logg-min", type=float, default=None)
     p.add_argument("--logg-max", type=float, default=None)
     p.add_argument("--workers", type=int, default=1, help="Parallel download/rebin workers")
+    p.add_argument("--batch-size", type=int, default=100,
+                   help="Models per batch; a batch is fully downloaded, rebinned and its "
+                        "HiRes files deleted before the next batch starts")
     p.add_argument("--retries", type=int, default=5, help="Network retries per request")
     p.add_argument("--timeout", type=float, default=120.0, help="Per-request timeout (s)")
     p.add_argument("--min-free-gb", type=float, default=2.0,
@@ -219,6 +225,8 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         p.error("--resolution must be positive")
     if args.workers < 1:
         p.error("--workers must be ≥ 1")
+    if args.batch_size < 1:
+        p.error("--batch-size must be ≥ 1")
     if args.validate_only and args.validate <= 0:
         p.error("--validate-only needs --validate N")
     return args
@@ -327,38 +335,56 @@ def _run_build(
     edges: NDArray[np.float64],
     args: argparse.Namespace,
 ) -> tuple[int, int, list[str]]:
-    """Returns ``(n_built, bytes_downloaded, failures)``."""
+    """
+    Build ``todo`` in sequential batches of ``args.batch_size`` models.
+
+    Only one batch is submitted to the pool at a time, so at most ``args.workers``
+    HiRes temp files exist at once and the next batch starts after the previous
+    one is fully rebinned and its temp files deleted.
+
+    Returns
+    -------
+    tuple
+        ``(n_built, bytes_downloaded, failures)``.
+
+    Limits
+    ------
+    A :class:`DiskSpaceError` cancels the rest of the current batch and aborts the
+    run (``SystemExit``); other per-model errors are recorded and the run continues.
+    """
     min_free = int(args.min_free_gb * 1024**3)
     built = 0
     downloaded = 0
     failures: list[str] = []
+    n_batches = -(-len(todo) // args.batch_size)
     t0 = time.monotonic()
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
-        futures: dict[Future[int], CompactJob] = {
-            pool.submit(_build_one, j, fetcher, tmp_dir, native, edges, args.resolution, min_free): j
-            for j in todo
-        }
-        pending = set(futures)
-        while pending:
-            done, pending = wait(pending, return_when=FIRST_EXCEPTION)
-            for fut in done:
+        for i_batch, start in enumerate(range(0, len(todo), args.batch_size), start=1):
+            batch = todo[start : start + args.batch_size]
+            futures: dict[Future[int], CompactJob] = {
+                pool.submit(_build_one, j, fetcher, tmp_dir, native, edges, args.resolution,
+                            min_free): j
+                for j in batch
+            }
+            for fut in as_completed(futures):
                 job = futures[fut]
                 try:
                     downloaded += fut.result()
                     built += 1
                 except DiskSpaceError as exc:
-                    for f in pending:
+                    for f in futures:
                         f.cancel()
                     raise SystemExit(f"ABORT: {exc} on {tmp_dir}; free space and rerun (resumable)")
                 except Exception as exc:  # noqa: BLE001 - report and continue; rerun resumes
                     failures.append(f"{job.subgrid}/{job.hires_name}: {exc}")
                     print(f"  FAILED {job.subgrid}/{job.hires_name}: {exc}", flush=True)
-                n_done = built + len(failures)
-                if n_done % 25 == 0 or n_done == len(todo):
-                    rate = n_done / max(time.monotonic() - t0, 1e-9)
-                    eta = (len(todo) - n_done) / rate if rate > 0 else float("inf")
-                    print(f"  [{n_done}/{len(todo)}] built={built} failed={len(failures)} "
-                          f"downloaded={_fmt_bytes(downloaded)} eta={eta / 60:.1f} min", flush=True)
+            n_done = built + len(failures)
+            rate = n_done / max(time.monotonic() - t0, 1e-9)
+            eta = (len(todo) - n_done) / rate if rate > 0 else float("inf")
+            free = shutil.disk_usage(tmp_dir).free
+            print(f"  batch {i_batch}/{n_batches} done: [{n_done}/{len(todo)}] built={built} "
+                  f"failed={len(failures)} downloaded={_fmt_bytes(downloaded)} "
+                  f"free={_fmt_bytes(free)} eta={eta / 60:.1f} min", flush=True)
     return built, downloaded, failures
 
 
@@ -435,6 +461,9 @@ def main(argv: Sequence[str] | None = None) -> int:
           f"(~{_fmt_bytes(est_hires)} per HiRes file, deleted after rebinning)")
     print(f"estimated compact footprint: {_fmt_bytes(len(jobs) * est_compact)} "
           f"(~{_fmt_bytes(est_compact)} per model, {nb} bins)")
+    print(f"plan: {-(-len(todo) // args.batch_size)} batches of ≤{args.batch_size} models, "
+          f"{args.workers} file(s) in flight; peak HiRes temp ≈ "
+          f"{_fmt_bytes(args.workers * est_hires)}")
     if args.dry_run:
         for job in todo[:20]:
             print(f"  would build {job.subgrid}/{job.hires_name}")
