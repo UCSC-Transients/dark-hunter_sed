@@ -20,6 +20,7 @@ from darkhunter_sed.phot_sed_fit import (
     run_1star_fit,
 )
 from darkhunter_sed.phot_sed_io import FLAG_DETECTION, FLAG_UPPER_LIMIT, PhotRow
+from darkhunter_sed.phot_sed_priors import build_prior_spec
 from darkhunter_sed.phot_sed_models import (
     ONE_STAR_PARAM_NAMES,
     OneStarParams,
@@ -99,6 +100,13 @@ def _mock_synth(
     return out
 
 
+class _NoDustBackend:
+    """Dust backend stub: every map query misses (CSFD → fallback Av cap)."""
+
+    def query_csfd(self, l_deg: float, b_deg: float) -> float | None:
+        return None
+
+
 def test_evaluate_mist_mock() -> None:
     pt = evaluate_mist(350.0, 1.0, 0.0, 0.0, predictor=_mock_mist_predictor)
     assert isinstance(pt, MistPoint)
@@ -140,6 +148,46 @@ def test_photometry_loglike_detection_and_ul() -> None:
     pred_bright = {"PS_g": 12.0, "PS_r": 10.5}
     ln1 = photometry_loglike(pred_bright, rows)
     assert ln1 < ln0
+
+
+def test_photometry_loglike_ul_is_never_a_bonus() -> None:
+    rows = [PhotRow("PS_r", 11.0, 0.02, FLAG_UPPER_LIMIT)]
+    ln_faint = photometry_loglike({"PS_r": 11.5}, rows)
+    ln_just_bright = photometry_loglike({"PS_r": 11.0 - 1e-9}, rows)
+    ln_bright = photometry_loglike({"PS_r": 10.9}, rows)
+    assert ln_faint == 0.0
+    assert ln_just_bright == pytest.approx(0.0, abs=1e-12)
+    assert ln_bright < 0.0
+
+
+def test_fit_1star_n_data_excludes_plx_when_in_prior() -> None:
+    truth = OneStarParams(
+        eep=320.0, mass=1.05, feh=-0.1, afe=0.0, a_v=0.15, parallax_mas=12.0
+    )
+    bands = ["b0", "b1", "b2"]
+    truth_pred = predict_1star_phot(
+        truth, bands, mist_predictor=_mock_mist_predictor, synth_phot=_mock_synth
+    )
+    rows = [PhotRow(b, truth_pred.mags[b], 0.02, FLAG_DETECTION) for b in bands]
+    rows.append(PhotRow("Gaia_parallax", 12.0, 0.1, FLAG_DETECTION))
+    rows.append(PhotRow("Gaia_Teff", 5745.0, 150.0, FLAG_DETECTION))
+    bounds = OneStarPriorBounds(
+        eep=(300.0, 340.0), mass=(0.9, 1.2), feh=(-0.3, 0.1),
+        a_v=(0.0, 0.5), parallax_mas=(11.5, 12.5),
+    )
+    kw = dict(
+        mist_predictor=_mock_mist_predictor, synth_phot=_mock_synth, bounds=bounds,
+        nlive=12, maxiter=10, seed=0, jit_warmup=False,
+    )
+    res_like = fit_1star_dynesty(rows, **kw)
+    assert res_like.n_data == len(rows)
+
+    spec = build_prior_spec(
+        0.0, 0.0, 12.0, 0.1, prior_gaia_vac=True, backend=_NoDustBackend()
+    )
+    assert spec.plx_in_prior
+    res_prior = fit_1star_dynesty(rows, prior_spec=spec, **kw)
+    assert res_prior.n_data == len(rows) - 1
 
 
 def test_bic_formula() -> None:

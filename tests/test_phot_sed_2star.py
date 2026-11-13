@@ -342,6 +342,27 @@ def test_fit_2star_dynesty_excludes_gaia_constraint_bands() -> None:
     assert result.ln_l_max > -1e4
 
 
+def test_fit_2star_uses_gaia_parallax_likelihood() -> None:
+    """Gaia parallax enters the 2-star likelihood (flat-prior mode) and n_data."""
+    rows, bounds = _make_2star_rows_and_bounds()
+    kw = dict(
+        mist_predictor=_mock_mist_predictor, synth_2star=_mock_synth_2star,
+        bounds=bounds, nlive=12, maxiter=20, seed=0, jit_warmup=False,
+    )
+    base = fit_2star_dynesty(rows, **kw)
+    assert base.n_data == len(rows)
+
+    # A parallax row far from every prior draw must lower the max likelihood;
+    # GSP-Phot rows are single-star constraints and must not count as data.
+    extra = [
+        PhotRow("Gaia_parallax", 8.0, 1e-4, FLAG_DETECTION),
+        PhotRow("Gaia_Teff", 6000.0, 150.0, FLAG_DETECTION),
+    ]
+    with_plx = fit_2star_dynesty(rows + extra, **kw)
+    assert with_plx.n_data == len(rows) + 1
+    assert with_plx.ln_l_max < base.ln_l_max - 10.0
+
+
 def test_run_2star_fit_writes_outputs(tmp_path: Path) -> None:
     """run_2star_fit writes summary JSON and samples npz with correct model field."""
     rows, bounds = _make_2star_rows_and_bounds()

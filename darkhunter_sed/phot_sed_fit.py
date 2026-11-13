@@ -209,7 +209,8 @@ def photometry_loglike(
     ``err_eff = sqrt(err_phot^2 + _PHOT_ERR_FLOOR^2 + sigma_int^2)``.
 
     - Detections (``flag=0``): ``-0.5*((obs-mod)/err_eff)^2 - ln(err_eff*sqrt(2π))``.
-    - Upper limits (``flag=1``): penalty only when model is brighter than the limit.
+    - Upper limits (``flag=1``): ``-0.5*((lim-mod)/err_eff)^2`` only when the
+      model is brighter than the limit; continuous (zero) at the limit.
     - Sentinel model (``m_mod >= 90``): photospheric model predicts no flux;
       detection may indicate a non-photospheric source (WD companion, accretion).
       Skipped for the 1-star model — the 2-star / WD model handles it.
@@ -235,9 +236,11 @@ def photometry_loglike(
             total += -0.5 * resid * resid - math.log(err) - ln_norm
         elif row.flag == FLAG_UPPER_LIMIT:
             # Brighter than limit → penalize; fainter → no contribution.
+            # No Gaussian normalization: -ln(err*sqrt(2π)) > 0 for err < 0.4 mag
+            # would reward violating the limit and make lnL jump at the limit.
             if m_mod < float(row.mag):
                 resid = (float(row.mag) - m_mod) / err
-                total += -0.5 * resid * resid - math.log(err) - ln_norm
+                total += -0.5 * resid * resid
         else:
             raise ValueError(f"Unsupported flag={row.flag} for band {row.band}")
     return float(total)
@@ -670,7 +673,12 @@ def fit_1star_dynesty(
     imax = int(np.argmax(logl))
     ln_l_max = float(logl[imax])
     best_theta = samples_u[imax].copy()
-    n_data = len(rows)
+    _plx_in_prior_final = prior_spec is not None and prior_spec.plx_in_prior
+    n_data = (
+        len(phot_rows)
+        + (0 if _plx_in_prior_final else len(plx_rows))
+        + len(teff_rows) + len(logg_rows) + len(mh_rows)
+    )
     bic = bic_from_max_likelihood(ln_l_max=ln_l_max, n_free=ndim, n_data=n_data)
 
     # Equal-weight posterior samples for export.
@@ -1033,6 +1041,11 @@ def fit_2star_dynesty(
     phot_rows = [r for r in rows if r.band not in _GAIA_CONSTRAINT_BANDS]
     if not phot_rows:
         raise ValueError("rows contains only Gaia constraints; need photometric bands too")
+    # Gaia parallax is astrometric, so it applies to the shared system parallax
+    # exactly as in the 1-star fit (GSP-Phot Teff/logg/MH are single-star
+    # quantities and are not used here).
+    _plx_in_prior_2s = prior_spec is not None and prior_spec.plx_in_prior
+    plx_like_rows = [] if _plx_in_prior_2s else [r for r in rows if r.band == _PLX_BAND]
     bands = [r.band for r in phot_rows]
     _2S_SIGMA_INT_IDX = len(TWO_STAR_PARAM_NAMES)
     ndim = len(TWO_STAR_PARAM_NAMES) + 1 + (len(BB_PARAM_NAMES) if use_bb_2star else 0)
@@ -1122,7 +1135,12 @@ def fit_2star_dynesty(
         except Exception:
             return _LOGLIKE_FLOOR
         lnl2 = photometry_loglike(pred.mags, phot_rows, sigma_int=sigma_int)
-        return lnl2 if math.isfinite(lnl2) else _LOGLIKE_FLOOR
+        for pr in plx_like_rows:
+            resid = (float(theta[_2S_PLX_IDX]) - pr.mag) / pr.err
+            lnl2 += -0.5 * resid * resid
+        if not math.isfinite(lnl2) or lnl2 < _LOGLIKE_FLOOR:
+            return _LOGLIKE_FLOOR
+        return float(lnl2)
 
     pool: Any = None
     queue_size: int | None = None
@@ -1160,7 +1178,7 @@ def fit_2star_dynesty(
     imax = int(np.argmax(logl))
     ln_l_max = float(logl[imax])
     best_theta = samples_u[imax].copy()
-    n_data = len(rows)
+    n_data = len(phot_rows) + len(plx_like_rows)
     bic = bic_from_max_likelihood(ln_l_max=ln_l_max, n_free=ndim, n_data=n_data)
 
     try:
