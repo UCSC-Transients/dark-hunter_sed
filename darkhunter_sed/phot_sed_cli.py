@@ -22,7 +22,7 @@ from darkhunter_sed.phot_sed_fit import (
     run_1star_fit,
     run_2star_fit,
 )
-from darkhunter_sed.phot_sed_io import read_photometry_fits
+from darkhunter_sed.phot_sed_io import convert_rows_to_ab, read_photometry_fits
 from darkhunter_sed.phoenix_grid import PhoenixGrid
 
 
@@ -397,7 +397,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Photometry FITS not found: {phot_path}", file=sys.stderr)
         return 1
 
-    all_rows = read_photometry_fits(phot_path)
+    all_rows = convert_rows_to_ab(read_photometry_fits(phot_path))
 
     if args.model == "wd":
         # WD+star model: needs MIST+PHOENIX for the MS companion component.

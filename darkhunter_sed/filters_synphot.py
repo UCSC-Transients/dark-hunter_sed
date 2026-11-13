@@ -16,6 +16,9 @@ Limits
 - **WISE_W3 / WISE_W4 are not registered** for Path-2: PHOENIX HiRes ends
   near 5.5 μm while W3/W4 thruputs extend to tens of μm (see module comments
   near the WISE stock entries).
+- Path-2 synthesis is AB-only. :data:`MAG_SYSTEM_REGISTRY` records each band's
+  native catalog system and the ``m_AB - m_native`` offset used to bring
+  Vega-system catalog / Bergeron magnitudes onto AB.
 """
 
 from __future__ import annotations
@@ -25,7 +28,7 @@ import os
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Mapping
+from typing import Iterable, Literal, Mapping, Sequence
 
 import numpy as np
 from astropy.io import fits
@@ -147,6 +150,160 @@ CONVERTED_BANDS: tuple[str, ...] = tuple(
         if b.ascii_source is not None
     )
 )
+
+
+MagSystem = Literal["AB", "Vega"]
+
+
+@dataclass(frozen=True, slots=True)
+class MagSystemSpec:
+    """
+    Native magnitude system of one band and its offset onto AB.
+
+    Parameters
+    ----------
+    system :
+        System of the magnitudes as written by ``photometry_gather`` into
+        ``*_phot.fits`` (and as tabulated by the Bergeron WD grid).
+    ab_minus_native :
+        ``m_AB - m_native`` (mag). Added to a native magnitude to obtain AB;
+        exactly ``0.0`` for AB-native bands.
+    reference :
+        Citation for the native system and offset.
+
+    Limits
+    ------
+    Offsets are single per-band constants (no colour terms). For Vega bands they
+    are the survey's own ``ZP_AB - ZP_Vega`` (Gaia) or the published AB−Vega
+    conversion for that passband. Known small departures of nominally-AB
+    systems from true AB (e.g. SDSS ``u_AB = u_SDSS - 0.04``, ``z_AB = z_SDSS +
+    0.02``) are documented in ``reference`` but **not** applied.
+    """
+
+    system: MagSystem
+    ab_minus_native: float
+    reference: str
+
+
+def _vega(offset: float, reference: str) -> MagSystemSpec:
+    return MagSystemSpec("Vega", float(offset), reference)
+
+
+def _ab(reference: str) -> MagSystemSpec:
+    return MagSystemSpec("AB", 0.0, reference)
+
+
+_REF_GAIA_DR3 = (
+    "Gaia DR3 phot_*_mean_mag are VEGAMAG; ZP_AB - ZP_Vega from Riello et al. "
+    "2021, A&A 649, A3, Table 3 (G 25.8010/25.6874, BP 25.3540/25.3385, "
+    "RP 25.1040/24.7479)"
+)
+_REF_GAIA_DR2 = (
+    "Gaia DR2 VEGAMAG; ZP_AB - ZP_Vega from Evans et al. 2018, A&A 616, A4, "
+    "Tables 1-2 (G 25.7934/25.6884, BP 25.3806/25.3514, RP 25.1161/24.7619)"
+)
+_REF_2MASS = (
+    "2MASS PSC j_m/h_m/k_m are Vega (Cohen et al. 2003, AJ 126, 1090); AB-Vega "
+    "from Blanton & Roweis 2007, AJ 133, 734, Table 1"
+)
+_REF_WISE = (
+    "AllWISE w?mpro are Vega; AB-Vega from Jarrett et al. 2011, ApJ 735, 112 "
+    "(Wright et al. 2010 Explanatory Supplement)"
+)
+_REF_JOHNSON = (
+    "Johnson-Kron-Cousins UBVRI (Bergeron columns only) are Vega; AB-Vega for "
+    "Bessell UBVRI from Blanton & Roweis 2007, AJ 133, 734, Table 1"
+)
+_REF_SWIFT = (
+    "Swift UVOT uvotsource/UVOTSSC default magnitudes are Vega (Poole et al. "
+    "2008, MNRAS 383, 627); AB-Vega from Breeveld et al. 2011, AIP Conf. Proc. "
+    "1358, 373 (Swift UVOT zero-point page). No Swift gather exists yet: rows "
+    "must be supplied in the Vega system"
+)
+_REF_SDSS = (
+    "SDSS modelMag is nominally AB (Fukugita et al. 1996; Oke & Gunn 1983); "
+    "known u_AB = u_SDSS - 0.04, z_AB = z_SDSS + 0.02 (SDSS DR docs) NOT applied"
+)
+_REF_PS1 = "Pan-STARRS1 mean PSF mags are AB (Tonry et al. 2012, ApJ 750, 99)"
+_REF_GALEX = "GALEX fuv_mag/nuv_mag are AB (Morrissey et al. 2007, ApJS 173, 682)"
+_REF_SKYMAPPER = (
+    "SkyMapper DR2 u_psf (stored as DECam_u) is AB (Onken et al. 2019, PASA 36, e033)"
+)
+
+
+MAG_SYSTEM_REGISTRY: dict[str, MagSystemSpec] = {
+    "GaiaDR3_G": _vega(25.8010 - 25.6874, _REF_GAIA_DR3),
+    "GaiaDR3_BP": _vega(25.3540 - 25.3385, _REF_GAIA_DR3),
+    "GaiaDR3_RP": _vega(25.1040 - 24.7479, _REF_GAIA_DR3),
+    "GaiaDR2_G": _vega(25.7934 - 25.6884, _REF_GAIA_DR2),
+    "GaiaDR2_BP": _vega(25.3806 - 25.3514, _REF_GAIA_DR2),
+    "GaiaDR2_RP": _vega(25.1161 - 24.7619, _REF_GAIA_DR2),
+    "2MASS_J": _vega(0.91, _REF_2MASS),
+    "2MASS_H": _vega(1.39, _REF_2MASS),
+    "2MASS_Ks": _vega(1.85, _REF_2MASS),
+    "WISE_W1": _vega(2.699, _REF_WISE),
+    "WISE_W2": _vega(3.339, _REF_WISE),
+    "WISE_W3": _vega(5.174, _REF_WISE),
+    "WISE_W4": _vega(6.620, _REF_WISE),
+    "Johnson_U": _vega(0.79, _REF_JOHNSON),
+    "Johnson_B": _vega(-0.09, _REF_JOHNSON),
+    "Johnson_V": _vega(0.02, _REF_JOHNSON),
+    "Johnson_R": _vega(0.21, _REF_JOHNSON),
+    "Johnson_I": _vega(0.45, _REF_JOHNSON),
+    "Swift_V": _vega(-0.01, _REF_SWIFT),
+    "Swift_B": _vega(-0.13, _REF_SWIFT),
+    "Swift_U": _vega(1.02, _REF_SWIFT),
+    "Swift_UVW1": _vega(1.51, _REF_SWIFT),
+    "Swift_UVM2": _vega(1.69, _REF_SWIFT),
+    "Swift_UVW2": _vega(1.73, _REF_SWIFT),
+    "Swift_white": _vega(0.80, _REF_SWIFT),
+    "SDSS_u": _ab(_REF_SDSS),
+    "SDSS_g": _ab(_REF_SDSS),
+    "SDSS_r": _ab(_REF_SDSS),
+    "SDSS_i": _ab(_REF_SDSS),
+    "SDSS_z": _ab(_REF_SDSS),
+    "PS_g": _ab(_REF_PS1),
+    "PS_r": _ab(_REF_PS1),
+    "PS_i": _ab(_REF_PS1),
+    "PS_z": _ab(_REF_PS1),
+    "PS_y": _ab(_REF_PS1),
+    "PS_w": _ab(_REF_PS1),
+    "GALEX_FUV": _ab(_REF_GALEX),
+    "GALEX_NUV": _ab(_REF_GALEX),
+    "DECam_u": _ab(_REF_SKYMAPPER),
+}
+
+
+def ab_minus_native(bands: Sequence[str]) -> NDArray[np.float64]:
+    """
+    Per-band ``m_AB - m_native`` offsets from :data:`MAG_SYSTEM_REGISTRY`.
+
+    Parameters
+    ----------
+    bands :
+        Band names (``*_phot.fits`` / Bergeron canonical names).
+
+    Returns
+    -------
+    NDArray[np.float64]
+        Offsets aligned with ``bands``; add to native magnitudes to get AB.
+
+    Raises
+    ------
+    KeyError
+        If any band has no registered magnitude system (never silently 0).
+
+    Use cases
+    ---------
+    Converting observed Vega rows at Path-2 load time and converting Bergeron
+    WD table columns before they are flux-summed with AB PHOENIX companions.
+    """
+    missing = [b for b in bands if b not in MAG_SYSTEM_REGISTRY]
+    if missing:
+        raise KeyError(f"No magnitude system registered for bands {missing}")
+    return np.array(
+        [MAG_SYSTEM_REGISTRY[b].ab_minus_native for b in bands], dtype=np.float64
+    )
 
 
 def pysyn_cdbs_root(explicit: Path | str | None = None) -> Path:

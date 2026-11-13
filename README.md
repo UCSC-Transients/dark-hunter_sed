@@ -82,7 +82,7 @@ Swift **catalog gather** is not implemented yet (filters/registry only).
 
 ### Path-2 PHOENIX + F99
 
-Forward photometry loads PHOENIX spectra from `$PHOENIX_DIR` (Teff, logg, [Fe/H], and [α/Fe] when Alpha-tagged directories exist), applies Fitzpatrick (1999) extinction at **R_V=3.1** via `dust_extinction.F99.extinguish` to the **full** (diluted) SED, **then** synthesizes AB mags on bandpass-native wavelength grids (`darkhunter_sed.phoenix_grid`, `darkhunter_sed.extinction_f99`). Multi-component models must **sum → F99 → synth** (not per-star magnitudes). HiRes arrays are not passed wholesale into synphot `Observation` (too slow).
+Forward photometry loads PHOENIX spectra from `$PHOENIX_DIR` (Teff, logg, [Fe/H], and [α/Fe] when Alpha-tagged directories exist), applies Fitzpatrick (1999) extinction at **R_V=3.1** via `dust_extinction.F99.extinguish` to the **full** (diluted) SED, **then** synthesizes AB mags on bandpass-native wavelength grids (`darkhunter_sed.phoenix_grid`, `darkhunter_sed.extinction_f99`). Multi-component models must **sum → F99 → synth** (not per-star magnitudes). HiRes arrays are not passed wholesale into synphot `Observation` (too slow). `*_phot.fits` keeps each band in its native catalog system (Gaia/2MASS/WISE/Swift Vega; PS1/SDSS/GALEX/SkyMapper AB); Path-2 converts observed rows and Bergeron WD magnitudes to AB at load time using `filters_synphot.MAG_SYSTEM_REGISTRY` (cited per-band offsets). Path 1 (uberMS) uses native magnitudes unchanged.
 
 `$PHOENIX_DIR` may hold either the full HiRes tree (~6 MB/spectrum) or a **compact** grid
 (flux-conserving rebin to constant R=2000 log-λ over the full ~500–55000 Å range, ~45 KB/spectrum,

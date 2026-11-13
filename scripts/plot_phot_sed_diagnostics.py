@@ -42,7 +42,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from darkhunter_sed.phot_sed_fit import SENTINEL_MAG_THRESHOLD
-from darkhunter_sed.phot_sed_io import read_photometry_fits, FLAG_UPPER_LIMIT
+from darkhunter_sed.phot_sed_io import convert_rows_to_ab, read_photometry_fits, FLAG_UPPER_LIMIT
 
 # Approximate effective wavelength in microns (blue → red)
 _BAND_WAV = {
@@ -118,10 +118,13 @@ def _load_wdstar(d: np.lib.npyio.NpzFile, summary: dict):
 # ---------------------------------------------------------------------------
 
 def _get_obs(phot_path: Path | None, bands: set[str]):
-    """Return (detections, upper_limits) as lists of PhotRow for the given bands."""
+    """Return (detections, upper_limits) as AB-system PhotRows for the given bands."""
     if not phot_path or not phot_path.is_file():
         return [], []
-    rows = [r for r in read_photometry_fits(phot_path) if r.band in bands and r.mag is not None]
+    rows = [
+        r for r in convert_rows_to_ab(read_photometry_fits(phot_path))
+        if r.band in bands and r.mag is not None
+    ]
     dets = [r for r in rows if r.flag != FLAG_UPPER_LIMIT]
     uls  = [r for r in rows if r.flag == FLAG_UPPER_LIMIT]
     return dets, uls

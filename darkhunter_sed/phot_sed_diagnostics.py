@@ -165,7 +165,9 @@ def plot_sed_panel(
     Parameters
     ----------
     rows :
-        Observed photometry rows (detections and upper limits).
+        Observed photometry rows (detections and upper limits) already converted
+        to AB with :func:`~darkhunter_sed.phot_sed_io.convert_rows_to_ab`; the
+        axis is labelled "AB mag" and model predictions are AB.
     model_preds :
         ``{model_label: {band: pred_mag}}`` mapping.  Each value must cover
         at least the detection bands present in *rows*.  Labels such as

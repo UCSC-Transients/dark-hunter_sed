@@ -37,6 +37,17 @@ band-name strings::
     u/g/r/i/z (SDSS)   → SDSS_u / SDSS_g / SDSS_r / SDSS_i / SDSS_z
     g/r/i/z/y (PS1)    → PS_g / PS_r / PS_i / PS_z / PS_y
 
+Magnitude systems
+-----------------
+Table columns are in each survey's native system (Holberg & Bergeron 2006):
+Johnson UBVRI, 2MASS, WISE and Gaia are Vega; SDSS, PS1 and GALEX are AB.
+Verified on the shipped Table_DA: at Teff=10 000 K, log g=8 (≈ Vega colours)
+V, J, H, Ks, W1, W2, G3, G3_BP, G3_RP all lie within ~0.1 mag of each other,
+while SDSS/PS1 z/y sit ~+0.4–0.5 mag fainter (AB offsets). ``BergeronGrid``
+adds :data:`~darkhunter_sed.filters_synphot.MAG_SYSTEM_REGISTRY` offsets at load
+time, so every magnitude it returns is **AB**, matching the PHOENIX companion
+and the Path-2 observed rows.
+
 Extinction
 ----------
 F99 extinction at effective wavelength λ_eff (Å) of each filter, tabulated
@@ -59,6 +70,7 @@ from darkhunter_sed.extinction_f99 import (
     _F99_WAVE_AA_MIN,
     f99_alambda_over_av,
 )
+from darkhunter_sed.filters_synphot import ab_minus_native
 
 # ---------------------------------------------------------------------------
 # Type aliases
@@ -213,6 +225,13 @@ class BergeronGrid:
         Array of shape ``(n_logg, n_teff, n_col)`` from ``_parse_global_table``.
         Column 0 is M/Mo; the subsequent columns correspond to ``_BAND_REGISTRY_*``
         column indices (minus the first two for Teff/logg).  Last column is Age.
+        Magnitudes are in Bergeron's native (per-survey) systems; they are
+        converted to AB here and ``data`` itself is not modified.
+
+    Limits
+    ------
+    All magnitudes from :meth:`synth_phot` are AB. Construction raises
+    ``KeyError`` if a registry band lacks a magnitude-system entry.
     """
 
     def __init__(
@@ -234,9 +253,10 @@ class BergeronGrid:
         # Column index in *data* (axis 2) is col_idx - 2 from the raw table because
         # we stripped Teff (col 0) and log g (col 1) when building data.
         self._interps: dict[str, RegularGridInterpolator] = {}
-        for col_idx, band_name, _ in registry:
+        ab_offsets = ab_minus_native([entry[1] for entry in registry])
+        for (col_idx, band_name, _), ab_off in zip(registry, ab_offsets):
             data_col = col_idx - 2  # offset for stripped Teff/logg
-            arr = data[:, :, data_col]  # (n_logg, n_teff)
+            arr = data[:, :, data_col] + ab_off  # (n_logg, n_teff), AB
             self._interps[band_name] = RegularGridInterpolator(
                 (self._logg_grid, teff_grid),
                 arr,
@@ -340,7 +360,7 @@ class BergeronGrid:
         Returns
         -------
         dict with keys:
-            ``"mags"``  : {band_name: apparent_magnitude}
+            ``"mags"``  : {band_name: apparent AB magnitude}
             ``"m_wd"``  : interpolated WD mass (M_sun)
             ``"extrap_mass"`` : True when M_WD > 1.3 M_sun or log g > 9.0
             ``"cooling_age_yr"`` : interpolated cooling age (yr)

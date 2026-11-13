@@ -14,18 +14,27 @@ Limits
   likelihood treatment of UL ``err`` is defined in the Path-2 fitter, not here.
 - Only ``flag`` values ``0`` and ``1`` are written; unknown flags on load are kept as
   integers but Path-1 detection dict builders treat non-zero as non-detections.
+
+Magnitude systems
+-----------------
+Files store each band in its **native catalog system** (e.g. Gaia/2MASS/WISE Vega,
+PS1/SDSS/GALEX AB; see :data:`darkhunter_sed.filters_synphot.MAG_SYSTEM_REGISTRY`).
+Loaded rows carry ``system=None`` (native). Path-2 converts them to AB once via
+:func:`convert_rows_to_ab`; Path-1 (uberMS) consumes native magnitudes unchanged.
 """
 
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from collections.abc import Callable, Iterable, Mapping, Sequence
 
 import numpy as np
 from astropy.io import fits
 from astropy.table import Table
+
+from darkhunter_sed.filters_synphot import MAG_SYSTEM_REGISTRY, MagSystem, ab_minus_native
 
 FLAG_DETECTION: int = 0
 FLAG_UPPER_LIMIT: int = 1
@@ -44,17 +53,22 @@ class PhotRow:
     band :
         Filter / system name (e.g. ``GaiaDR3_G``, ``PS_g``).
     mag :
-        AB/Vega magnitude for a detection, or 3σ UL magnitude when ``flag=1``.
+        Magnitude for a detection, or 3σ UL magnitude when ``flag=1``, in the
+        system given by ``system``.
     err :
         Magnitude uncertainty; must be finite and ``> 0`` for I/O validity.
     flag :
         ``0`` detection, ``1`` 3σ upper limit.
+    system :
+        ``None`` = band's native catalog system (as stored in ``*_phot.fits``);
+        ``"AB"`` once converted by :func:`convert_rows_to_ab`.
     """
 
     band: str
     mag: float
     err: float
     flag: int = FLAG_DETECTION
+    system: MagSystem | None = None
 
 
 PhotTuple = tuple[str, float, float] | tuple[str, float, float, int]
@@ -156,8 +170,20 @@ def write_photometry_fits(
     -------
     Path
         Resolved output path.
+
+    Raises
+    ------
+    ValueError
+        If any row was already converted (``system`` set): the file schema has no
+        system column, so only native catalog magnitudes may be stored.
     """
     rows = normalize_phot_rows(photometry)
+    converted = [r.band for r in rows if r.system is not None]
+    if converted:
+        raise ValueError(
+            f"Refusing to write system-converted rows {converted}; "
+            "*_phot.fits stores native catalog magnitudes only"
+        )
     out = Path(path)
     out.parent.mkdir(parents=True, exist_ok=True)
 
@@ -314,3 +340,47 @@ def split_detections_and_upper_limits(
     dets = [r for r in rows if r.flag == FLAG_DETECTION]
     uls = [r for r in rows if r.flag == FLAG_UPPER_LIMIT]
     return dets, uls
+
+
+def convert_rows_to_ab(rows: Sequence[PhotRow]) -> list[PhotRow]:
+    """
+    Convert native-system photometry rows to AB for Path-2 likelihoods / plots.
+
+    Parameters
+    ----------
+    rows :
+        Rows from :func:`read_photometry_fits` (``system=None``) or already
+        converted rows (``system="AB"``).
+
+    Returns
+    -------
+    list[PhotRow]
+        Same order and length. Rows with ``system=None`` whose band is in
+        :data:`~darkhunter_sed.filters_synphot.MAG_SYSTEM_REGISTRY` get
+        ``mag + (m_AB - m_native)`` and ``system="AB"``; detections and 3σ upper
+        limits are shifted identically and ``err`` is unchanged.
+
+    Use cases
+    ---------
+    Called once right after loading ``*_phot.fits`` in the Path-2 CLI and
+    diagnostics script, so observed rows match AB synthetic magnitudes.
+
+    Limits
+    ------
+    Idempotent: rows already tagged ``"AB"`` are never shifted again. Rows whose
+    band has no registered system (``Gaia_parallax``, ``Gaia_Teff`` and other
+    non-magnitude constraints, or unknown bands) pass through untouched with
+    ``system=None``. Path-1 (uberMS) must not call this.
+    """
+    idx = np.array(
+        [i for i, r in enumerate(rows) if r.system is None and r.band in MAG_SYSTEM_REGISTRY],
+        dtype=np.intp,
+    )
+    out = list(rows)
+    if idx.size == 0:
+        return out
+    mags = np.array([rows[i].mag for i in idx], dtype=np.float64)
+    mags_ab = mags + ab_minus_native([rows[i].band for i in idx])
+    for i, m in zip(idx, mags_ab):
+        out[i] = replace(rows[i], mag=float(m), system="AB")
+    return out
